@@ -37,20 +37,20 @@ class SysmicV2Env(gym.Env):
         self.observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(69,), dtype=np.float32)
 
         arm_links = [
-            'left_link0',
-            'left_link1',
-            'left_link2',
-            'left_link3',
-            'left_link4',
-            'left_link5',
-            'left_jaw',
-            'right_link0',
-            'right_link1',
-            'right_link2',
-            'right_link3',
-            'right_link4',
-            'right_link5',
-            'right_jaw',
+            'arm_left_base_link',
+            'arm_left_shoulder_pan_link',
+            'arm_left_upper_arm_link',
+            'arm_left_forearm_link',
+            'arm_left_wrist_link',
+            'arm_left_wrist_roll_link',
+            'arm_left_jaw_link',
+            'arm_right_base_link',
+            'arm_right_shoulder_pan_link',
+            'arm_right_upper_arm_link',
+            'arm_right_forearm_link',
+            'arm_right_wrist_link',
+            'arm_right_wrist_roll_link',
+            'arm_right_jaw_link',
         ]
         self.arm_body_ids = {
             self.model.body(name).id
@@ -62,20 +62,20 @@ class SysmicV2Env(gym.Env):
         self.lift_qpos_id = int(self.model.joint('lift_joint').qposadr[0])
         self.lift_dof_id = int(self.model.joint('lift_joint').dofadr[0])
         self.left_arm_joints = [
-            'left_shoulder_pan',
-            'left_shoulder_lift',
-            'left_elbow_flex',
-            'left_wrist_flex',
-            'left_wrist_roll',
-            'left_gripper',
+            'arm_left_shoulder_pan_joint',
+            'arm_left_shoulder_lift_joint',
+            'arm_left_elbow_flex_joint',
+            'arm_left_wrist_flex_joint',
+            'arm_left_wrist_roll_joint',
+            'arm_left_gripper_joint',
         ]
         self.right_arm_joints = [
-            'right_shoulder_pan',
-            'right_shoulder_lift',
-            'right_elbow_flex',
-            'right_wrist_flex',
-            'right_wrist_roll',
-            'right_gripper',
+            'arm_right_shoulder_pan_joint',
+            'arm_right_shoulder_lift_joint',
+            'arm_right_elbow_flex_joint',
+            'arm_right_wrist_flex_joint',
+            'arm_right_wrist_roll_joint',
+            'arm_right_gripper_joint',
         ]
         self.arm_joints = self.left_arm_joints + self.right_arm_joints
         self.arm_qpos_ids = np.array(
@@ -89,8 +89,8 @@ class SysmicV2Env(gym.Env):
 
         self.base_link_id = self.model.body('base_link').id
         self.lift_carriage_id = self.model.body('lift_carriage_link').id
-        self.left_jaw_id = self.model.body('left_jaw').id
-        self.right_jaw_id = self.model.body('right_jaw').id
+        self.left_jaw_id = self.model.body('arm_left_jaw_link').id
+        self.right_jaw_id = self.model.body('arm_right_jaw_link').id
 
         joint_to_actuator = {}
         for actuator_id in range(self.model.nu):
