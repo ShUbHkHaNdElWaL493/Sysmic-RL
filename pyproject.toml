@@ -1,0 +1,26 @@
+[project]
+name = "sysmic-rl"
+version = "1.0.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Shubh Khandelwal", email = "shubh4664@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "gymnasium==0.29.1",
+    "mujoco==3.3.1",
+    "numpy==2.2.5",
+    "packaging==26.3",
+    "stable-baselines3[extra]>=2.9.2",
+]
+
+[project.scripts]
+sysmic-rl = "sysmic_rl:main"
+sysmic-rl-check-mjcf = "sysmic_rl.check_mjcf:main"
+sysmic-rl-train = "sysmic_rl.train:main"
+sysmic-rl-test = "sysmic_rl.test:main"
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14.0"]
+build-backend = "uv_build"
