@@ -19,7 +19,7 @@ class SysmicV2Env(gym.Env):
         self.step_count = 0
 
         # Action Space: 13 dimensions
-        # - Lift control mechanism (6 dims): effort
+        # - Lift control mechanism (1 dim): position
         # - Left arm joints (6 dims): position
         # - Right arm joints (6 dims): position
         self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(13,), dtype=np.float32)
@@ -62,17 +62,17 @@ class SysmicV2Env(gym.Env):
         self.lift_qpos_id = int(self.model.joint('lift_joint').qposadr[0])
         self.lift_dof_id = int(self.model.joint('lift_joint').dofadr[0])
         self.left_arm_joints = [
-            'arm_left_shoulder_pan_joint',
-            'arm_left_shoulder_lift_joint',
-            'arm_left_elbow_flex_joint',
+            'arm_left_pan_joint',
+            'arm_left_shoulder_joint',
+            'arm_left_elbow_joint',
             'arm_left_wrist_flex_joint',
             'arm_left_wrist_roll_joint',
             'arm_left_gripper_joint',
         ]
         self.right_arm_joints = [
-            'arm_right_shoulder_pan_joint',
-            'arm_right_shoulder_lift_joint',
-            'arm_right_elbow_flex_joint',
+            'arm_right_pan_joint',
+            'arm_right_shoulder_joint',
+            'arm_right_elbow_joint',
             'arm_right_wrist_flex_joint',
             'arm_right_wrist_roll_joint',
             'arm_right_gripper_joint',
@@ -89,8 +89,8 @@ class SysmicV2Env(gym.Env):
 
         self.base_link_id = self.model.body('base_link').id
         self.lift_carriage_id = self.model.body('lift_carriage_link').id
-        self.left_jaw_id = self.model.body('arm_left_jaw_link').id
-        self.right_jaw_id = self.model.body('arm_right_jaw_link').id
+        self.left_jaw_id = self.model.body('arm_left_wrist_roll_link').id
+        self.right_jaw_id = self.model.body('arm_right_wrist_roll_link').id
 
         joint_to_actuator = {}
         for actuator_id in range(self.model.nu):
@@ -108,12 +108,9 @@ class SysmicV2Env(gym.Env):
         self.lift_max = float(self.model.jnt_range[self.lift_joint_id, 1])
         if self.model.actuator_ctrllimited[self.lift_actuator_id]:
             ctrl_min, ctrl_max = self.model.actuator_ctrlrange[self.lift_actuator_id]
-            self.lift_vel_min = float(ctrl_min)
-            self.lift_vel_max = float(ctrl_max)
-        else:
-            self.lift_vel_min = -0.1
-            self.lift_vel_max = 0.1
-        self.lift_max_vel = float(min(abs(self.lift_vel_min), abs(self.lift_vel_max)))
+            self.lift_min = max(self.lift_min, float(ctrl_min))
+            self.lift_max = min(self.lift_max, float(ctrl_max))
+
         self.arm_min_limits = np.array(
             [self.model.jnt_range[self.model.joint(j).id, 0] for j in self.arm_joints],
             dtype=np.float32,
@@ -125,11 +122,12 @@ class SysmicV2Env(gym.Env):
 
         # Control & smoothness parameters (50 Hz policy at default dt=0.002s)
         self.arm_action_scale = 0.02    # rad per step (~1.0 rad/s max)
-        self.lift_action_scale = 0.005  # m per step (~0.25 m/s max)
+        self.lift_action_scale = 0.002  # m per step (~0.1 m/s max)
         self.action_ema_alpha = 0.25    # Lower = smoother, higher = snappier
-        self.arm_max_lag = 0.15   # rad
+        self.arm_max_lag = 0.15         # rad
+        self.lift_max_lag = 0.03        # m
 
-        self.lift_vel_cmd = 0.0
+        self.lift_target_qpos = 0.0
         self.arm_target_qpos = np.zeros(12, dtype=np.float32)
         self.smoothed_action = np.zeros(13, dtype=np.float32)
 
@@ -139,16 +137,6 @@ class SysmicV2Env(gym.Env):
         self.right_target_pos = np.zeros(3, dtype=np.float32)
         self.right_target_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
         self.right_target_gripper = 0.0
-
-    @staticmethod
-    def _random_quat_wxyz():
-        u1, u2, u3 = np.random.random(3)
-        w = np.sqrt(1.0 - u1) * np.sin(2.0 * np.pi * u2)
-        x = np.sqrt(1.0 - u1) * np.cos(2.0 * np.pi * u2)
-        y = np.sqrt(u1) * np.sin(2.0 * np.pi * u3)
-        z = np.sqrt(u1) * np.cos(2.0 * np.pi * u3)
-        q = np.array([w, x, y, z], dtype=np.float32)
-        return q / np.linalg.norm(q)
 
     def _get_arm_collisions(self):
         collisions = []
@@ -197,36 +185,29 @@ class SysmicV2Env(gym.Env):
         return np.concatenate([current_state, target_state]).astype(np.float32)
 
     def _sample_target(self):
-        base_pos = self.data.xpos[self.base_link_id]
-        carriage_x = base_pos[0] - 0.117
-        carriage_z_zero = base_pos[2] + 0.64
-        virtual_lift_z = carriage_z_zero + np.random.uniform(self.lift_min, self.lift_max)
+        saved_qpos = self.data.qpos.copy()
 
-        self.left_target_pos = np.array(
-            [
-                carriage_x + np.random.uniform(0.15, 0.35),
-                base_pos[1] + np.random.uniform(0.02, 0.25),
-                virtual_lift_z + np.random.uniform(-0.12, 0.15),
-            ],
-            dtype=np.float32,
-        )
-        self.left_target_quat = self._random_quat_wxyz()
-        self.left_target_gripper = float(
-            np.random.uniform(self.arm_min_limits[5], self.arm_max_limits[5])
-        )
+        for _ in range(20):
+            self.data.qpos[self.lift_qpos_id] = self.np_random.uniform(
+                self.lift_min, self.lift_max
+            )
+            self.data.qpos[self.arm_qpos_ids] = self.np_random.uniform(
+                self.arm_min_limits, self.arm_max_limits
+            )
+            mujoco.mj_forward(self.model, self.data)
+            if not self._get_arm_collisions():
+                break
 
-        self.right_target_pos = np.array(
-            [
-                carriage_x + np.random.uniform(0.15, 0.35),
-                base_pos[1] + np.random.uniform(-0.25, -0.02),
-                virtual_lift_z + np.random.uniform(-0.12, 0.15),
-            ],
-            dtype=np.float32,
-        )
-        self.right_target_quat = self._random_quat_wxyz()
-        self.right_target_gripper = float(
-            np.random.uniform(self.arm_min_limits[11], self.arm_max_limits[11])
-        )
+        self.left_target_pos = self.data.xpos[self.left_jaw_id].astype(np.float32).copy()
+        self.left_target_quat = self.data.xquat[self.left_jaw_id].astype(np.float32).copy()
+        self.left_target_gripper = float(self.data.qpos[self.arm_qpos_ids[5]])
+
+        self.right_target_pos = self.data.xpos[self.right_jaw_id].astype(np.float32).copy()
+        self.right_target_quat = self.data.xquat[self.right_jaw_id].astype(np.float32).copy()
+        self.right_target_gripper = float(self.data.qpos[self.arm_qpos_ids[11]])
+
+        self.data.qpos[:] = saved_qpos
+        mujoco.mj_forward(self.model, self.data)
 
     def _set_target(
         self,
@@ -263,25 +244,38 @@ class SysmicV2Env(gym.Env):
 
         if reposition:
             mujoco.mj_resetData(self.model, self.data)
-            init_arm_qpos = np.random.uniform(-0.2, 0.2, size=len(self.arm_qpos_ids))
-            self.data.qpos[self.lift_qpos_id] = np.random.uniform(
-                self.lift_min, self.lift_max
+            arm_low = self.arm_min_limits + 0.05
+            arm_high = self.arm_max_limits - 0.05
+            neutral_arm = np.clip(
+                np.zeros(len(self.arm_qpos_ids), dtype=np.float32), arm_low, arm_high
             )
-            self.data.qpos[self.arm_qpos_ids] = np.clip(
-                init_arm_qpos, self.arm_min_limits, self.arm_max_limits
-            )
-
-        mujoco.mj_forward(self.model, self.data)
+            if self.np_random.random() < 0.2:
+                self.data.qpos[self.lift_qpos_id] = self.np_random.uniform(
+                    self.lift_min, self.lift_max
+                )
+                self.data.qpos[self.arm_qpos_ids] = neutral_arm
+            else:
+                for _ in range(50):
+                    self.data.qpos[self.lift_qpos_id] = self.np_random.uniform(
+                        self.lift_min, self.lift_max
+                    )
+                    self.data.qpos[self.arm_qpos_ids] = self.np_random.uniform(
+                        arm_low, arm_high
+                    )
+                    mujoco.mj_forward(self.model, self.data)
+                    if not self._get_arm_collisions():
+                        break
 
         self.step_count = 0
-        self.lift_vel_cmd = 0.0
+        self.lift_target_qpos = float(
+            np.clip(self.data.qpos[self.lift_qpos_id], self.lift_min, self.lift_max)
+        )
         self.arm_target_qpos = self.data.qpos[self.arm_qpos_ids].astype(np.float32).copy()
         self.smoothed_action = np.zeros(13, dtype=np.float32)
 
-        self.data.act[self.lift_act_adr] = float(
-            np.clip(self.data.qpos[self.lift_qpos_id], self.lift_min, self.lift_max)
-        )
-        self.data.ctrl[self.lift_actuator_id] = 0.0
+        if self.lift_act_adr >= 0:
+            self.data.act[self.lift_act_adr] = self.lift_target_qpos
+        self.data.ctrl[self.lift_actuator_id] = self.lift_target_qpos
         self.data.ctrl[self.arm_actuator_ids] = self.arm_target_qpos
 
         mujoco.mj_forward(self.model, self.data)
@@ -324,15 +318,17 @@ class SysmicV2Env(gym.Env):
             + (1.0 - self.action_ema_alpha) * prev_smoothed
         )
 
-        # 2. Compute lift velocity command bounded to velocity limits
-        prev_lift_vel_cmd = self.lift_vel_cmd
-        self.lift_vel_cmd = float(
-            np.clip(
-                self.smoothed_action[0] * self.lift_max_vel,
-                self.lift_vel_min,
-                self.lift_vel_max,
-            )
+        # 2. Update lift position target with anti-windup bounds
+        prev_lift_target = self.lift_target_qpos
+        current_lift_qpos = float(self.data.qpos[self.lift_qpos_id])
+
+        next_lift = prev_lift_target + float(self.smoothed_action[0]) * self.lift_action_scale
+        next_lift = np.clip(
+            next_lift,
+            current_lift_qpos - self.lift_max_lag,
+            current_lift_qpos + self.lift_max_lag,
         )
+        self.lift_target_qpos = float(np.clip(next_lift, self.lift_min, self.lift_max))
 
         # 3. Update arm position targets with anti-windup bounds
         prev_arm_target = self.arm_target_qpos.copy()
@@ -348,11 +344,11 @@ class SysmicV2Env(gym.Env):
             next_arm, self.arm_min_limits, self.arm_max_limits
         ).astype(np.float32)
 
-        # 4. Substep interpolation for smooth arm positions and lift velocity ramps
+        # 4. Substep interpolation for smooth lift and arm position targets
         for sub in range(self.frame_skip):
             alpha = (sub + 1) / self.frame_skip
             self.data.ctrl[self.lift_actuator_id] = (
-                (1.0 - alpha) * prev_lift_vel_cmd + alpha * self.lift_vel_cmd
+                (1.0 - alpha) * prev_lift_target + alpha * self.lift_target_qpos
             )
             self.data.ctrl[self.arm_actuator_ids] = (
                 (1.0 - alpha) * prev_arm_target + alpha * self.arm_target_qpos

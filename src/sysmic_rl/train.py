@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-from ament_index_python import get_package_share_directory
 import os
 from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.callbacks import CheckpointCallback
@@ -22,11 +21,7 @@ def main():
     time_steps = 2_000_000
 
     env = SubprocVecEnv([make_env(mjcf_file=mjcf_file) for _ in range(8)])
-    model_path = os.path.join(
-        get_package_share_directory('sysmic_rl'),
-        'models',
-        f'sysmic_v2_{model_type}.zip'
-    )
+    model_path = os.path.join('models', f'sysmic_v2_{model_type}.zip')
 
     if model_type == 'PPO':
         # ---------------------------------------------------------
