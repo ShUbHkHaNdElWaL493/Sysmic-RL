@@ -75,13 +75,13 @@ def main():
         # ---------------------------------------------------------
         if os.path.exists(model_path):
             if (torch.cuda.is_available()):
-                model = PPO.load(
+                model = SAC.load(
                     model_path,
                     env=env,
                     device='cuda'
                 )
             else:
-                model = PPO.load(
+                model = SAC.load(
                     model_path,
                     env=env,
                     device='cpu'
