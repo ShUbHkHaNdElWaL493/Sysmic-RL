@@ -296,23 +296,23 @@
     <position name="lift" joint="lift_joint" kp="200000" kv="10000" ctrlrange="0 0.447677" forcerange="-2000 2000" />
 
     <!-- Left Arm -->
-    <position name="arm_left_pan_joint" joint="arm_left_pan_joint" kp="200" kv="3" ctrlrange="-1.919862 1.919862" forcerange="-2.94 2.94" />
-    <position name="arm_left_shoulder_joint" joint="arm_left_shoulder_joint" kp="200" kv="3" ctrlrange="0.000000 3.490659" forcerange="-2.94 2.94" />
-    <position name="arm_left_elbow_joint" joint="arm_left_elbow_joint" kp="200" kv="3" ctrlrange="-3.385939 0.000000" forcerange="-2.94 2.94" />
-    <position name="arm_left_wrist_flex_joint" joint="arm_left_wrist_flex_joint" kp="200" kv="3" ctrlrange="-1.658063 1.658063" forcerange="-2.94 2.94" />
-    <position name="arm_left_wrist_roll_joint" joint="arm_left_wrist_roll_joint" kp="200" kv="3" ctrlrange="-2.740167 2.844887" forcerange="-2.94 2.94" />
-    <position name="arm_left_gripper_joint" joint="arm_left_gripper_joint" kp="200" kv="3" ctrlrange="-0.174533 1.745329" forcerange="-2.94 2.94" />
+    <position name="arm_left_pan_joint" joint="arm_left_pan_joint" kp="200" kv="3" ctrlrange="-1.919862 1.919862" forcerange="-11.0 11.0" />
+    <position name="arm_left_shoulder_joint" joint="arm_left_shoulder_joint" kp="200" kv="3" ctrlrange="0.000000 3.490659" forcerange="-11.0 11.0" />
+    <position name="arm_left_elbow_joint" joint="arm_left_elbow_joint" kp="200" kv="3" ctrlrange="-3.385939 0.000000" forcerange="-11.0 11.0" />
+    <position name="arm_left_wrist_flex_joint" joint="arm_left_wrist_flex_joint" kp="200" kv="3" ctrlrange="-1.658063 1.658063" forcerange="-11.0 11.0" />
+    <position name="arm_left_wrist_roll_joint" joint="arm_left_wrist_roll_joint" kp="200" kv="3" ctrlrange="-2.740167 2.844887" forcerange="-11.0 11.0" />
+    <position name="arm_left_gripper_joint" joint="arm_left_gripper_joint" kp="200" kv="3" ctrlrange="-0.174533 1.745329" forcerange="-11.0 11.0" />
 
     <!-- Right Arm -->
-    <position name="arm_right_pan_joint" joint="arm_right_pan_joint" kp="200" kv="3" ctrlrange="-1.919862 1.919862" forcerange="-2.94 2.94" />
-    <position name="arm_right_shoulder_joint" joint="arm_right_shoulder_joint" kp="200" kv="3" ctrlrange="0.000000 3.490659" forcerange="-2.94 2.94" />
-    <position name="arm_right_elbow_joint" joint="arm_right_elbow_joint" kp="200" kv="3" ctrlrange="-3.385939 0.000000" forcerange="-2.94 2.94" />
-    <position name="arm_right_wrist_flex_joint" joint="arm_right_wrist_flex_joint" kp="200" kv="3" ctrlrange="-1.658063 1.658063" forcerange="-2.94 2.94" />
-    <position name="arm_right_wrist_roll_joint" joint="arm_right_wrist_roll_joint" kp="200" kv="3" ctrlrange="-2.740167 2.844887" forcerange="-2.94 2.94" />
-    <position name="arm_right_gripper_joint" joint="arm_right_gripper_joint" kp="200" kv="3" ctrlrange="-0.174533 1.745329" forcerange="-2.94 2.94" />
+    <position name="arm_right_pan_joint" joint="arm_right_pan_joint" kp="200" kv="3" ctrlrange="-1.919862 1.919862" forcerange="-11.0 11.0" />
+    <position name="arm_right_shoulder_joint" joint="arm_right_shoulder_joint" kp="200" kv="3" ctrlrange="0.000000 3.490659" forcerange="-11.0 11.0" />
+    <position name="arm_right_elbow_joint" joint="arm_right_elbow_joint" kp="200" kv="3" ctrlrange="-3.385939 0.000000" forcerange="-11.0 11.0" />
+    <position name="arm_right_wrist_flex_joint" joint="arm_right_wrist_flex_joint" kp="200" kv="3" ctrlrange="-1.658063 1.658063" forcerange="-11.0 11.0" />
+    <position name="arm_right_wrist_roll_joint" joint="arm_right_wrist_roll_joint" kp="200" kv="3" ctrlrange="-2.740167 2.844887" forcerange="-11.0 11.0" />
+    <position name="arm_right_gripper_joint" joint="arm_right_gripper_joint" kp="200" kv="3" ctrlrange="-0.174533 1.745329" forcerange="-11.0 11.0" />
 
     <!-- Drive Wheels -->
-    <velocity name="wheel_left" joint="wheel_left_joint" kv="20" ctrlrange="-27 27" forcerange="-10 10" gear="1"/>
-    <velocity name="wheel_right" joint="wheel_right_joint" kv="20" ctrlrange="-27 27" forcerange="-10 10" gear="-1"/>
+    <velocity name="wheel_left" joint="wheel_left_joint" kv="20" ctrlrange="-27 27" forcerange="-10 10" gear="1" />
+    <velocity name="wheel_right" joint="wheel_right_joint" kv="20" ctrlrange="-27 27" forcerange="-10 10" gear="-1" />
   </actuator>
 </mujoco>
