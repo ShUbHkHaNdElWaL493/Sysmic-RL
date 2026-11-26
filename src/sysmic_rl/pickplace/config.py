@@ -27,15 +27,31 @@ class ArmSpec:
 
 LEFT_ARM = ArmSpec(
     "left",
-    ("arm_left_pan_joint", "arm_left_shoulder_joint", "arm_left_elbow_joint",
-     "arm_left_wrist_flex_joint", "arm_left_wrist_roll_joint", "arm_left_gripper_joint"),
-    "arm_left_wrist_roll_link", "arm_left_jaw_link", (0.0576, 0.0236, 0.0436),
+    (
+        "arm_left_pan_joint",
+        "arm_left_shoulder_joint",
+        "arm_left_elbow_joint",
+        "arm_left_wrist_flex_joint",
+        "arm_left_wrist_roll_joint",
+        "arm_left_gripper_joint"
+    ),
+    "arm_left_wrist_roll_link",
+    "arm_left_jaw_link",
+    (0.0576, 0.0236, 0.0436),
 )
 RIGHT_ARM = ArmSpec(
     "right",
-    ("arm_right_pan_joint", "arm_right_shoulder_joint", "arm_right_elbow_joint",
-     "arm_right_wrist_flex_joint", "arm_right_wrist_roll_joint", "arm_right_gripper_joint"),
-    "arm_right_wrist_roll_link", "arm_right_jaw_link", (0.0576, -0.0259, 0.0423),
+    (
+        "arm_right_pan_joint",
+        "arm_right_shoulder_joint",
+        "arm_right_elbow_joint",
+        "arm_right_wrist_flex_joint",
+        "arm_right_wrist_roll_joint",
+        "arm_right_gripper_joint"
+    ),
+    "arm_right_wrist_roll_link",
+    "arm_right_jaw_link",
+    (0.0576, -0.0259, 0.0423),
 )
 ARMS = {"left": LEFT_ARM, "right": RIGHT_ARM}
 

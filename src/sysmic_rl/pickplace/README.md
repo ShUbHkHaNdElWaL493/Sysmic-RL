@@ -23,7 +23,8 @@ cfg = PickPlaceConfig()
 cfg.scene.robot_xml = "mjcf/sysmic_v2.xml"       # or set $SYSMIC_ROBOT_XML
 env = SysmicPickPlaceEnv(cfg, render_mode="human")
 obs, info = env.reset(seed=0, options={"object": "glass", "arm": "left"})
-obs, reward, terminated, truncated, info = env.step(env.action_space.sample())
+while True:
+  obs, reward, terminated, truncated, info = env.step(env.action_space.sample())
 ```
 
 ---
