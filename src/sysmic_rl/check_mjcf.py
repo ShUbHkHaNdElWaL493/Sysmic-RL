@@ -11,9 +11,9 @@ def main() -> None:
         help="Path to the MJCF file (.xml)"
     )
     args = parser.parse_args()
-    if not os.path.exists(args.mjcf_path):
-        raise FileNotFoundError(f'MJCF file not found: {args.mjcf_path}')
-    mujoco.viewer.launch_from_path(str(args.mjcf_path))
+    if not os.path.exists(args.mjcf):
+        raise FileNotFoundError(f'MJCF file not found: {args.mjcf}')
+    mujoco.viewer.launch_from_path(str(args.mjcf))
 
 if __name__ == '__main__':
     main()

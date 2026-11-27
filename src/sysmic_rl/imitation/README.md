@@ -28,25 +28,29 @@ start: it already knows roughly what a good grasp looks like, so RL only has to 
 
 ### What it is
 A hand-written controller that **cheats**: it reads the exact object pose, goal, contacts from the simulator
-(the neural network only gets the 86-number observation). It outputs actions in the **same 13-D normalised space**
+(the neural network only gets the 94-number observation). It handles **one arm or both** (plates/bowls are carried bimanually). It outputs actions in the **same 13-D normalised space**
 as the policy, so its outputs are directly usable as supervised labels.
 
 ### How it works
-1. **Targets** (`_grasp_targets`): from the object's pose and style decide the grasp point, a pre-grasp point, and the direction the tool should point.
-   * `top` style (plate, bowl): grasp the rim on the robot-facing side, tool pointing **down** (−z), pre-grasp above.
-   * `side` style (glass, mug): grasp at 60 % of height, tool pointing **forward** (+x), pre-grasp pulled back along −x.
-2. **Move** (`_goto`): one step of *damped-least-squares inverse kinematics*.
-   * Builds the Jacobian of the grasp point (3 rows for position + 3 rows for orientation, with the rotation about the tool axis ignored so the wrist roll stays free).
-   * Solves for a small joint change `dq` that moves the grasp point toward the target.
-   * Converts `dq` into the normalised action: `(q_now + dq − q_target) / scale`, clipped to [−1, 1].
-   * The lift joint is part of the solve but down-weighted (`lift_col_scale`) so the arm is preferred to the lift.
+1. **Targets:** `env.grasp_plan()` gives, per active arm, the grasp point and tool axis (the same plan the reward uses).
+   Pre-grasp = grasp point pulled back along the tool axis by `pre_dist`.
+   * one arm, `top` object: rim, tool **down**; one arm, `side` object: body, tool **forward**;
+   * both arms: left hand on the +y side, right hand on the −y side (`bimanual_style` = `down` or `inward`).
+2. **Seed** (`SEED` phase, global IK): purely local IK can get stuck at joint limits (e.g. tool pointing up). So the expert first asks
+   `env.seed_config()` for the best sampled arm configuration for the pre-grasp pose and moves there **in joint space**.
+3. **Move** (`_goto`): one step of *damped-least-squares IK over all active arms at once*.
+   * Stacks, per arm, 3 position rows + 3 orientation rows (rotation about the tool axis ignored → wrist roll stays free). Unknowns: lift + 5 joints per arm.
+   * Both arms share the lift joint, so solving them together avoids conflicting lift commands.
+   * Converts `dq` into the normalised action `(q_now + dq − q_target)/scale`, clipped to [−1, 1].
+   * **Lift lock:** if the object sits on a lift-mounted surface (`env.surface_moves`), the lift column is disabled until the object is grasped (otherwise the "target" would ride away with the arm).
 3. **Phases** (state machine):
 
 | Phase | Goal | Moves on when |
 |---|---|---|
+| `SEED` | joint-space move to a sampled configuration near the pre-grasp pose | all joints within `seed_tol` or timeout |
 | `PRE` | go to pre-grasp pose with gripper open | position error < 1.5×`pos_tol` and axis error < `axis_tol`, or timeout |
 | `APPROACH` | move into the grasp pose | error < `pos_tol` or timeout |
-| `CLOSE` | close gripper | ≥ `close_steps` and the two-sided grasp contact exists (or 4× timeout) |
+| `CLOSE` | close gripper(s) | ≥ `close_steps` and **every** active arm has finger+jaw contact (or 4× timeout) |
 | `LIFT` | rise `lift_height` | reached the height or timeout |
 | `TRANSPORT` | shift so the object is above the goal | xy error < `pos_tol` or timeout |
 | `LOWER` | descend until the object rests on the table | z error < 6 mm or timeout |
@@ -54,7 +58,8 @@ as the policy, so its outputs are directly usable as supervised labels.
 | `RETREAT` | back away | 25 steps |
 | `DONE` | hold, gripper open | — |
 
-   **Recovery:** if during `LIFT/TRANSPORT/LOWER` the grasp is lost for `regrasp_after` steps, it returns to `PRE`.
+   **Recovery:** if during `LIFT/TRANSPORT/LOWER` the grasp is lost (any active arm) for `regrasp_after` steps, it returns to `PRE`.
+   In bimanual episodes both hands follow the same phase, so they close, lift, move and release together.
    **Timeouts** (`phase_timeout`) prevent deadlock: a stuck phase gives up and advances.
 
 ### API
@@ -75,13 +80,13 @@ action = expert.act(env)                            # takes the ENV (privileged)
 | `axis_tol` | 0.25 rad | stuck in `PRE` | larger, or check `ArmSpec.tool_axis` |
 | `damping` | 0.05 | jerky, huge joint jumps near singularities | larger |
 | `pos_gain`, `rot_gain` | 0.3 | slow convergence / oscillation | up if slow, down if oscillating |
-| `rot_weight` | 0.5 | position OK but wrong orientation | larger |
-| `lift_col_scale` | 0.5 | lift joint wobbling / overused | smaller = uses lift less |
+| `rot_weight` | 0.15 | position OK but wrong orientation (up); position error large because orientation dominates (down) | tune; 1 rad of tilt ≈ `1/rot_weight` m of position error |
+| `seed_tol` | 0.06 rad | seed phase never finishes | larger |
+| `retreat_dist` | 0.04 m | gripper drags the object when backing away | larger |
+| `lift_col_scale` | 0.5 | lift joint wobbling / overused | smaller = uses lift less (it is fully locked pre-grasp on a lift-mounted surface) |
 | `close_steps` | 15 | gripper doesn't squeeze enough before lifting | larger |
 | `release_steps` | 12 | object dragged away on release | larger |
 | `phase_timeout` | 150 | — | the safety net; rarely changed |
-| `side_height_frac` | 0.6 | glass/mug grasped too high/low | adjust |
-| `top_depth` | 0.006 m | rim not between the fingers | adjust |
 | `regrasp_after` | 6 | thrashing between phases | larger |
 
 ### Tuning the expert (practical loop)
@@ -89,6 +94,8 @@ action = expert.act(env)                            # takes the ENV (privileged)
 2. Note the phase it was in when it failed (add a `print(PHASE_NAMES[expert.phase])` in your own loop).
 3. Fix the cause: unreachable target → geometry (`config.py`); wrong sign/offset → `ArmSpec`/gripper angles; contact trouble → `ExpertConfig`.
 4. Repeat; measure with 100 episodes. Object-specific failures usually mean grasp style/offset for that object.
+
+> Grasp height/depth now live in `TaskConfig.side_height_frac` / `top_depth` (the env's grasp plan), not in `ExpertConfig`.
 
 > ⚠ The expert assumes the tool points along `tool_axis` (default +x of the wrist-roll frame) and that `gripper_open_q`/`gripper_close_q` are right. If both are wrong nothing will work — verify with the probe first.
 
@@ -102,7 +109,7 @@ action = expert.act(env)                            # takes the ENV (privileged)
 ```
 demos.h5
 ├── ep_00000/
-│   ├── obs             (T+1, 86) float32   observation before every step + the final one
+│   ├── obs             (T+1, 94) float32   observation before every step + the final one
 │   ├── actions         (T, 13)             what was EXECUTED (may include noise)
 │   ├── expert_actions  (T, 13)             what the expert WANTED (clean labels)
 │   ├── rewards         (T,)

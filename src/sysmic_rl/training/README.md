@@ -104,7 +104,7 @@ uv run python -m sysmic_rl.training.evaluate --model runs/sac/best_model.zip --e
 
 * Runs fixed seeds (1000+i) so different models are compared on the same episodes.
 * Deterministic policy (no exploration noise) — `predict(obs, deterministic=True)`.
-* Prints success rate overall, per object, per arm (`arm:left`, `arm:right`) and mean return.
+* Prints success rate overall, per object, per arm mode (`arm:left`, `arm:right`, `arm:both` = bimanual episodes) and mean return.
 * Python API: `evaluate(policy_fn, cfg, episodes, seed)` where `policy_fn(obs, env) -> action`; give it a `.reset()` method if it has state (the expert does).
 
 **Always judge progress by success rate, not return** — return can rise from partial progress or reward exploitation.

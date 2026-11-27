@@ -10,9 +10,8 @@ import os
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-# Override with SYSMIC_ROBOT_XML=/abs/path/to/robot.xml if your file is named differently.
-DEFAULT_ROBOT_XML = os.environ.get("SYSMIC_ROBOT_XML", str(REPO_ROOT / "mjcf" / "sysmic_v2.xml"))
+WS_ROOT = Path(__file__).resolve().parents[3]
+ROBOT_XML = os.environ.get("ROBOT_XML", str(WS_ROOT / "mjcf" / "sysmic_v2.xml"))
 
 
 @dataclass(frozen=True)
@@ -27,55 +26,61 @@ class ArmSpec:
 
 LEFT_ARM = ArmSpec(
     "left",
-    (
-        "arm_left_pan_joint",
-        "arm_left_shoulder_joint",
-        "arm_left_elbow_joint",
-        "arm_left_wrist_flex_joint",
-        "arm_left_wrist_roll_joint",
-        "arm_left_gripper_joint"
-    ),
-    "arm_left_wrist_roll_link",
-    "arm_left_jaw_link",
-    (0.0576, 0.0236, 0.0436),
+    ("arm_left_pan_joint", "arm_left_shoulder_joint", "arm_left_elbow_joint",
+     "arm_left_wrist_flex_joint", "arm_left_wrist_roll_joint", "arm_left_gripper_joint"),
+    "arm_left_wrist_roll_link", "arm_left_jaw_link", (0.0576, 0.0236, 0.0436),
 )
 RIGHT_ARM = ArmSpec(
     "right",
-    (
-        "arm_right_pan_joint",
-        "arm_right_shoulder_joint",
-        "arm_right_elbow_joint",
-        "arm_right_wrist_flex_joint",
-        "arm_right_wrist_roll_joint",
-        "arm_right_gripper_joint"
-    ),
-    "arm_right_wrist_roll_link",
-    "arm_right_jaw_link",
-    (0.0576, -0.0259, 0.0423),
+    ("arm_right_pan_joint", "arm_right_shoulder_joint", "arm_right_elbow_joint",
+     "arm_right_wrist_flex_joint", "arm_right_wrist_roll_joint", "arm_right_gripper_joint"),
+    "arm_right_wrist_roll_link", "arm_right_jaw_link", (0.0576, -0.0259, 0.0423),
 )
 ARMS = {"left": LEFT_ARM, "right": RIGHT_ARM}
 
 
 @dataclass
 class SceneConfig:
-    robot_xml: str = DEFAULT_ROBOT_XML
+    robot_xml: str = ROBOT_XML
     objects: tuple = ("plate", "glass", "bowl", "mug")
     object_scale: float = 1.0
     friction: tuple = (1.0, 0.005, 0.0001)
-    # Table (world frame == robot base frame; the robot base is fixed at the origin)
-    table_top_z: float = 0.72
-    table_center_xy: tuple = (0.32, 0.0)
-    table_half_xy: tuple = (0.20, 0.45)
+    # --- destination table: spawned every episode (centre x/y ranges, top-surface height range)
+    table_half_xy: tuple = (0.18, 0.22)
     table_thickness: float = 0.04
-    # Object spawn / goal region on the table (x, y ranges)
-    spawn_x: tuple = (0.22, 0.34)
-    spawn_y: tuple = (-0.25, 0.25)
+    table_x: tuple = (0.25, 0.55)
+    table_y: tuple = (-0.25, 0.25)
+    table_z: tuple = (0.55, 1.05)
+    table_clearance: float = 0.03      # min gap between table and any robot geom
+    # --- reachability filtering (kinematic reach cloud; see pickplace_env._build_reach_cloud)
+    reach_check: bool = True
+    reach_samples: int = 50000
+    reach_tol: float = 0.04            # grasp point must be within this of a reachable sample
+    reach_axis_tol: float = 0.5        # rad: sample's tool axis must be this close to the needed one
+
+
+@dataclass
+class SourceConfig:
+    """Where objects START: a flat surface that belongs to the robot (the 'extrusion').
+
+    manual=None -> auto-detected by casting rays downwards onto the robot's collision geoms.
+    manual=(cx, cy, z, hx, hy) -> world-frame rectangle at the home pose (use if detection picks the wrong patch).
+    body -> body the surface is attached to (moves with it). None = auto (detected) / world (manual).
+    """
+    manual: tuple | None = None
+    body: str | None = None
+    search_x: tuple = (-0.10, 0.60)
+    search_y: tuple = (-0.45, 0.45)
+    search_z: tuple = (0.30, 1.40)
+    step: float = 0.01
+    min_area: float = 0.01             # m^2: smallest patch accepted as "the surface"
+    edge_margin: float = 0.015         # keep objects this far from the patch edge
 
 
 @dataclass
 class TaskConfig:
     arm_mode: str = "auto"            # "left" | "right" | "auto" (random per episode)
-    max_episode_steps: int = 400
+    max_episode_steps: int = 500
     frame_skip: int = 10              # 10 * 2 ms = 50 Hz policy
     ema_alpha: float = 0.25
     arm_action_scale: float = 0.03    # rad / step
@@ -91,6 +96,14 @@ class TaskConfig:
     home_noise: float = 0.05
     lift_home_range: tuple = (0.05, 0.30)
     min_goal_dist: float = 0.10
+    # --- grasp geometry (shared by env reward/reachability and the expert)
+    side_height_frac: float = 0.6      # "side" grasp height as a fraction of object height
+    top_depth: float = 0.006           # "top" grasp: how far below the rim top the grasp point sits
+    # --- bimanual episodes
+    bimanual_objects: tuple = ("plate", "bowl")
+    bimanual_prob: float = 1.0         # prob. an object in bimanual_objects is carried with BOTH arms
+    bimanual_y_max: float = 0.10       # |y| limit of the object so both arms can reach its two sides
+    bimanual_style: str = "down"       # "down": both tools point down onto opposite rims; "inward": tools point at each other
     # success
     place_tol_xy: float = 0.02
     place_tol_z: float = 0.015
@@ -129,6 +142,7 @@ class PickPlaceConfig:
     scene: SceneConfig = field(default_factory=SceneConfig)
     task: TaskConfig = field(default_factory=TaskConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)
+    source: SourceConfig = field(default_factory=SourceConfig)
 
     def to_dict(self):
         return asdict(self)

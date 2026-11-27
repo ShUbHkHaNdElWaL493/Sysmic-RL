@@ -46,7 +46,7 @@ def write_stub_robot(directory) -> str:
     left = _arm("left", 0.1146, {"pan": "0 0.5 0.866", "sh": "0 0.866 -0.5"})
     right = _arm("right", -0.1146, {"pan": "0 -0.5 0.866", "sh": "0 0.866 0.5"})
     pos = lambda n, lo, hi, j=None: f'<position name="{n}" joint="{j or n}" kp="200" kv="3" ctrlrange="{lo} {hi}" forcerange="-11 11"/>'
-    acts = [pos("lift", 0, 0.447677, "lift_joint")]
+    acts = ['<position name="lift" joint="lift_joint" kp="200000" kv="10000" ctrlrange="0 0.447677" forcerange="-2000 2000"/>']
     for s in ("left", "right"):
         for n, lo, hi in [("pan", -1.919862, 1.919862), ("shoulder", 0, 3.490659), ("elbow", -3.385939, 0),
                           ("wrist_flex", -1.658063, 1.658063), ("wrist_roll", -2.740167, 2.844887),
@@ -65,6 +65,7 @@ def write_stub_robot(directory) -> str:
         <inertial pos="0.07 0 0" mass="30" diaginertia="1 1 0.4"/>
         <joint name="lift_joint" type="slide" axis="0 0 1" range="0 0.447677"/>
         <geom type="box" size="0.02 0.2 0.05" pos="0.0 0 0.1" mass="1"/>
+        <geom name="shelf" type="box" size="0.14 0.22 0.01" pos="0.20 0 0.03" mass="1"/>
         {left}
         {right}
       </body>
