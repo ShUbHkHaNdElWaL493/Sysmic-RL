@@ -1,9 +1,9 @@
 """Pick-and-place Gymnasium environment for the Sysmic bimanual robot.
 
-* The scene is the static `mjcf/sysmic_v2_scene.xml` (robot included unmodified + shelf proxy + table + utensils).
-* All utensils START in a row on the robot's shelf; one of them (the active one) must be moved.
-* It must be PLACED on the destination table, which is re-posed (x, y, height, yaw) in the arms' reach every episode.
-* Per episode either ONE arm or BOTH arms are active (plates/bowls are carried with both by default).
+* The scene is the static `mjcf/sysmic_v2_scene.xml` (robot included unmodified + shelf riser + table + utensils).
+* All utensils START in a row on the shelf riser; one of them (the active one) must be moved.
+* It must be PLACED on the destination table in front of the robot, re-posed (x, y, yaw; fixed height) every episode.
+* Plates/bowls are always carried with BOTH arms (rim pinch), the glass by its stem and the mug by its handle with ONE.
 * Every pose is randomised in place (data.qpos / model.body_pos / model.body_quat); the model is compiled once.
 
 Action layout (13, same as SysmicV2Env): [lift, left(5 joints + gripper), right(5 + gripper)].
@@ -19,11 +19,16 @@ import numpy as np
 from .config import ARMS, OBJECT_SPECS, PickPlaceConfig
 
 SIDES = ("left", "right")
-DOWN = np.array([0.0, 0.0, -1.0])
 
 
 def _yaw_quat(yaw):
     return np.array([np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2)])
+
+
+def _perp(v, axis):
+    """Unit component of v perpendicular to the unit vector axis."""
+    v = np.asarray(v, dtype=np.float64) - (np.dot(v, axis)) * axis
+    return v / np.linalg.norm(v)
 
 
 class SysmicPickPlaceEnv(gym.Env):
@@ -52,9 +57,9 @@ class SysmicPickPlaceEnv(gym.Env):
         self.sides = ("left",)
         self.side = "left"
         self.obj_name = self.object_names[0]
-        self.table_center = np.array([sum(sc.table_x) / 2, sum(sc.table_y) / 2])
+        self.table_center = self.model.body_pos[self.table_bid][:2].copy()
         self.table_yaw = 0.0
-        self.place_z = sum(sc.table_z) / 2
+        self.place_z = float(sc.table_z)
         self.src_z = self.place_z
         self.fail_z = 0.1
         self.goal_pos = np.array([*self.table_center, self.place_z])
@@ -131,6 +136,7 @@ class SysmicPickPlaceEnv(gym.Env):
         # robot geoms the table must keep clear of: every collidable geom that is not world/table/utensil
         self.robot_geoms = np.where((gb != 0) & ~table_geoms & (self.geom_obj < 0)
                                     & ((m.geom_contype != 0) | (m.geom_conaffinity != 0)))[0]
+        self._movable = table_geoms | (self.geom_obj >= 0)   # ignored by the reach cloud's collision filter
         self._fric0 = m.geom_friction.copy()
         self._mass0 = m.body_mass.copy()
         self._inertia0 = m.body_inertia.copy()
@@ -145,9 +151,13 @@ class SysmicPickPlaceEnv(gym.Env):
         sid = m.site(self.cfg.scene.shelf_site).id
         (cx, cy, z), (hx, hy, _) = self.data.site_xpos[sid], m.site_size[sid]   # site centre = shelf surface
         self.shelf = (float(cx), float(cy), float(z), float(hx), float(hy))
+        # the table must stay in front of the shelf (otherwise it would cover the utensils)
+        self.front_x = float(cx + hx) + self.cfg.scene.table_clearance
         # fingertips may touch the shelf / base (needed to pinch a plate lying flat) without penalty
         gb = m.geom_bodyid
         self.geom_surface = (gb == m.body("base_link").id) | (np.arange(m.ngeom) == m.geom("shelf_top").id)
+        # where each arm's pan axis meets the ground plan (xy): sets the arm's natural approach heading
+        self.pan_xy = {s: self.data.xanchor[m.joint(ARMS[s].joints[0]).id][:2].copy() for s in SIDES}
 
     def _set_active(self, obj_name, sides):
         self.obj_name, self.sides, self.side = obj_name, tuple(sides), sides[0]
@@ -184,10 +194,19 @@ class SysmicPickPlaceEnv(gym.Env):
         b = self.finger_bid[side]
         return self.data.xmat[b].reshape(3, 3) @ np.array(ARMS[side].tool_axis)
 
+    def close_axis_world(self, side=None):
+        side = side or self.side
+        b = self.finger_bid[side]
+        return self.data.xmat[b].reshape(3, 3) @ np.array(ARMS[side].close_axis)
+
     def arm_dofs(self, side): return self.dof_idx[self.sl[side]]
     def joint_pos(self): return self.data.qpos[self.q_idx].copy()
     def object_pos(self): return self.data.xpos[self.obj_body[self.obj_name]].copy()
     def object_com(self): return self.data.xipos[self.obj_body[self.obj_name]].copy()
+
+    def object_yaw(self):
+        R = self.data.xmat[self.obj_body[self.obj_name]].reshape(3, 3)
+        return float(np.arctan2(R[1, 0], R[0, 0]))
 
     def object_tilt(self):
         R = self.data.xmat[self.obj_body[self.obj_name]].reshape(3, 3)
@@ -197,87 +216,164 @@ class SysmicPickPlaceEnv(gym.Env):
         return float(np.linalg.norm(self.data.cvel[self.obj_body[self.obj_name]][3:]))
 
     # ------------------------------------------------------------ grasp plan
-    def grasp_plan(self, obj_pos=None, sides=None):
-        """{side: (grasp_point_world, tool_axis_world)} for an object whose base-centre is at obj_pos.
+    def heading(self, side, p):
+        """Horizontal unit vector from the arm's pan axis to point p: the arm's natural approach heading."""
+        v = np.asarray(p[:2], dtype=np.float64) - self.pan_xy[side]
+        return np.array([*(v / np.linalg.norm(v)), 0.0])
 
-        Single arm : 'top' objects -> rim on the robot-facing side, tool down; 'side' objects -> body, tool forward.
-        Both arms  : left hand takes the +y side, right hand the -y side (see TaskConfig.bimanual_style).
+    def yaw_to_arm(self, p, side):
+        """Object yaw that points its local +x (the mug handle) from p towards the arm's pan axis."""
+        v = self.pan_xy[side] - np.asarray(p[:2], dtype=np.float64)
+        return float(np.arctan2(v[1], v[0]))
+
+    def close_signed(self):
+        """Rim grasps need the jaw on the outside of the wall (the thick fixed finger goes inside); others are symmetric."""
+        return self.spec.grasp_style == "rim"
+
+    def heading_free(self):
+        """Stem/rim grasps only fix the tool pitch: the heading follows the arm. A handle fixes the full direction."""
+        return self.spec.grasp_style != "handle"
+
+    def grasp_plan(self, obj_pos=None, sides=None, obj_yaw=None, headings=None):
+        """{side: (grasp_point, tool_axis, close_axis)} for the active object with its base centre at obj_pos / yaw obj_yaw
+        (default: where it is now). close_axis = direction the jaw must move when closing (perpendicular to tool_axis).
+
+        The arms have 5 joints, so the tool heading is not free: for "rim"/"stem" only the pitch is prescribed and the
+        heading is the arm's (default: `heading()`, or `headings[side]`, e.g. the current tool heading).
+        rim    : pitch `rim_pitch`; jaw closes across the rim wall from the outside. One arm: the robot-facing point of
+                 the rim. Both arms: points `bimanual_rim_angle` either side of it (left hand +y, right hand -y).
+        stem   : one arm, pitch `stem_pitch`; jaws close horizontally across the stem.
+        handle : one arm; tool along the handle towards the body, pitch `handle_pitch`; the jaws close on both flat sides
+                 of the handle loop (outer bar between them).
         Used by the reward (reach term), the observation, the reachability filter and the expert.
         """
         sides = tuple(sides or self.sides)
         o = self.object_pos() if obj_pos is None else np.asarray(obj_pos, dtype=np.float64)
+        yaw = self.object_yaw() if obj_yaw is None else float(obj_yaw)
         spec, tc = self.spec, self.cfg.task
-        top = spec.grasp_style == "top"
-        z = o[2] + (spec.height - tc.top_depth if top else tc.side_height_frac * spec.height)
-        if len(sides) == 2:
-            r = spec.rim_radius if top else spec.radius
+        up = np.array([0.0, 0.0, 1.0])
+        z = o[2] + spec.grasp_z
+
+        def tool(h, pitch):
+            return np.cos(pitch) * h - np.sin(pitch) * up
+
+        def head(s, p):
+            return headings[s] if headings and s in headings else self.heading(s, p)
+
+        if spec.grasp_style == "rim":
+            angles = {"left": tc.bimanual_rim_angle, "right": -tc.bimanual_rim_angle} if len(sides) == 2 else {sides[0]: 0.0}
             plan = {}
-            for s, sgn in (("left", 1.0), ("right", -1.0)):
-                axis = DOWN if tc.bimanual_style == "down" else np.array([0.0, -sgn, 0.0])
-                plan[s] = (np.array([o[0], o[1] + sgn * r, z]), axis)
+            for s, a in angles.items():
+                radial = np.array([-np.cos(a), np.sin(a), 0.0])    # axis -> grasp point (0 = towards the robot, -x)
+                p = o + spec.grasp_r * radial
+                p[2] = z
+                t = tool(head(s, p), tc.rim_pitch)
+                # wall normal pointing into the dish: the jaw moves along it from outside (finger inside)
+                inward = -np.sin(spec.wall_slope) * radial + np.cos(spec.wall_slope) * up
+                plan[s] = (p, t, _perp(inward, t))
             return plan
+        if len(sides) != 1:
+            raise ValueError(f"{spec.name} ({spec.grasp_style} grasp) is carried with one arm")
         s = sides[0]
-        if top:
-            return {s: (np.array([o[0] - spec.rim_radius, o[1], z]), DOWN)}
-        return {s: (np.array([o[0], o[1], z]), np.array([1.0, 0.0, 0.0]))}
+        if spec.grasp_style == "stem":
+            p = np.array([o[0], o[1], z])
+            h = head(s, p)
+            return {s: (p, tool(h, tc.stem_pitch), np.cross(up, h))}
+        if spec.grasp_style == "handle":
+            hd = np.array([np.cos(yaw), np.sin(yaw), 0.0])        # handle direction (object's local +x)
+            p = o + spec.grasp_r * hd
+            p[2] = z
+            return {s: (p, tool(-hd, tc.handle_pitch), np.cross(up, -hd))}
+        raise ValueError(f"unknown grasp_style {spec.grasp_style!r}")
+
+    def grasp_axes(self, side, tool_now):
+        """(tool_axis, close_axis) targets for an arm whose tool currently points along tool_now (heading kept)."""
+        h = np.array([tool_now[0], tool_now[1], 0.0])
+        n = np.linalg.norm(h)
+        heads = {side: h / n} if self.heading_free() and n > 1e-3 else None
+        _, t, c = self.grasp_plan(headings=heads)[side]
+        return t, c
 
     # --------------------------------------------------------------- reachability
     def _build_reach_cloud(self):
-        """Forward-kinematics samples (grasp point + tool axis) over random lift/arm joints. Cheap: kinematics only."""
+        """Forward-kinematics samples (grasp point, tool axis, closing axis) over random lift/arm joints, keeping only
+        configurations where the arm touches neither the robot, the other arm (at home) nor the shelf riser.
+        Utensils and the table are ignored (they move)."""
         m, d, sc = self.model, self.data, self.cfg.scene
         rng = np.random.default_rng(0)
         saved = d.qpos.copy()
         n = sc.reach_samples
         cloud = {}
+        ct, ca = m.geom_contype.copy(), m.geom_conaffinity.copy()
+        m.geom_contype[self._movable], m.geom_conaffinity[self._movable] = 0, 0   # ignored anyway: skip them (faster)
         for s in SIDES:
             idx = self.q_idx[self.sl[s]][:5]
             lo, hi = self.lo[self.sl[s]][:5], self.hi[self.sl[s]][:5]
             lifts = rng.uniform(self.lo[0], self.hi[0], n)
             qs = rng.uniform(lo, hi, (n, 5))
-            pts, axes = np.empty((n, 3)), np.empty((n, 3))
+            X, M = np.empty((n, 3)), np.empty((n, 3, 3))
+            ok = np.ones(n, dtype=bool)
+            code = SIDES.index(s) + 1
+            b, garm = self.finger_bid[s], self.geom_arm
+            d.qpos[:] = saved
             for i in range(n):
                 d.qpos[self.q_idx[0]] = lifts[i]
                 d.qpos[idx] = qs[i]
                 mujoco.mj_kinematics(m, d)
-                pts[i], axes[i] = self.grasp_point(s), self.tool_axis_world(s)
-            cloud[s] = (pts, axes, lifts, qs)
+                mujoco.mj_collision(m, d)
+                if d.ncon:
+                    g = d.contact.geom[:d.ncon]
+                    ok[i] = not np.any((d.contact.dist[:d.ncon] < 0) & ((garm[g[:, 0]] == code) | (garm[g[:, 1]] == code)))
+                X[i], M[i] = d.xpos[b], d.xmat[b].reshape(3, 3)
+            arm = ARMS[s]
+            pts = X + M @ np.array(arm.grasp_offset)
+            axes, closes = M @ np.array(arm.tool_axis), M @ np.array(arm.close_axis)
+            cloud[s] = (pts[ok], axes[ok], lifts[ok], qs[ok], closes[ok])
+        m.geom_contype[:], m.geom_conaffinity[:] = ct, ca
         d.qpos[:] = saved
         mujoco.mj_forward(m, d)
         return cloud
 
+    def _axis_err(self, axes, axis):
+        """Angle between sampled tool axes and the planned one: full direction for a handle, pitch only otherwise."""
+        if self.heading_free():
+            return np.abs(np.arcsin(np.clip(axes[:, 2], -1, 1)) - np.arcsin(np.clip(axis[2], -1, 1)))
+        return np.arccos(np.clip(axes @ axis, -1, 1))
+
     def reachable(self, plan, sides=None):
-        """Can the active arm(s) reach this grasp plan?"""
+        """Can the active arm(s) reach this grasp plan? Point + tool axis (pitch only when the heading is free); the
+        closing direction is free: the wrist roll turns about the tool axis and the grasp point sits ~on that axis."""
         if self._cloud is None:
             return True
         sc = self.cfg.scene
         for s in (sides or self.sides):
-            pt, axis = plan[s]
-            pts, axes, _, _ = self._cloud[s]
-            sel = axes @ axis > np.cos(sc.reach_axis_tol)
+            pt, axis = plan[s][0], plan[s][1]
+            pts, axes = self._cloud[s][0], self._cloud[s][1]
+            sel = self._axis_err(axes, axis) < sc.reach_axis_tol
             if not sel.any() or np.min(np.linalg.norm(pts[sel] - pt, axis=1)) > sc.reach_tol:
                 return False
         return True
 
     def seed_config(self, goals):
-        """Global-IK seed: best sampled joint configuration for {side: (point, axis)}.
+        """Global-IK seed: best sampled joint configuration for {side: (point, axis[, close_axis])}.
 
         Returns (lift, {side: q5}, err) or None. With two arms the second arm's sample is chosen
-        with a similar lift (the lift joint is shared).
+        with a similar lift (the lift joint is shared). If a close_axis is given, the wrist roll of the
+        chosen sample is turned so the jaws close along it.
         """
         if self._cloud is None:
             return None
-        ang = lambda axes, ax: np.arccos(np.clip(axes @ ax, -1, 1))
         sides = list(goals)
 
         def err(side):
-            pts, axes, _, _ = self._cloud[side]
-            return np.linalg.norm(pts - goals[side][0], axis=1) + 0.10 * ang(axes, goals[side][1])
+            pts, axes = self._cloud[side][0], self._cloud[side][1]
+            return np.linalg.norm(pts - goals[side][0], axis=1) + 0.10 * self._axis_err(axes, goals[side][1])
 
         e1 = err(sides[0])
         qs1, lifts1 = self._cloud[sides[0]][3], self._cloud[sides[0]][2]
         if len(sides) == 1:
             i = int(np.argmin(e1))
-            return float(lifts1[i]), {sides[0]: qs1[i]}, float(e1[i])
+            return float(lifts1[i]), {sides[0]: self._roll_to(sides[0], i, goals[sides[0]])}, float(e1[i])
         e2 = err(sides[1])
         lifts2, qs2 = self._cloud[sides[1]][2], self._cloud[sides[1]][3]
         best = None
@@ -287,7 +383,26 @@ class SysmicPickPlaceEnv(gym.Env):
             if best is None or e1[i] + tot[j] < best[0]:
                 best = (float(e1[i] + tot[j]), int(i), j)
         _, i, j = best
-        return float(lifts1[i]), {sides[0]: qs1[i], sides[1]: qs2[j]}, best[0]
+        return (float(lifts1[i]), {sides[0]: self._roll_to(sides[0], i, goals[sides[0]]),
+                                   sides[1]: self._roll_to(sides[1], j, goals[sides[1]])}, best[0])
+
+    def _roll_to(self, side, i, goal):
+        """Cloud sample i's 5 arm joints, with the wrist roll turned so the jaws close as the active grasp needs
+        (for the sample's own tool heading). The wrist roll joint turns the finger body about its tool axis, so this
+        is a pure rotation of close_axis. goal[2], if given, overrides the closing direction."""
+        q5 = self._cloud[side][3][i].copy()
+        a, c = self._cloud[side][1][i], self._cloud[side][4][i]
+        want = goal[2] if len(goal) > 2 and goal[2] is not None else self.grasp_axes(side, a)[1]
+        want = _perp(want, a)
+        delta = np.arctan2(np.dot(np.cross(c, want), a), np.dot(c, want))
+        if not self.close_signed():
+            delta = (delta + np.pi / 2) % np.pi - np.pi / 2       # symmetric grasp: turn <= 90 deg
+        k = self.sl[side].start + 4
+        for dq in (delta, delta + np.pi, delta - np.pi):
+            if self.lo[k] <= q5[4] + dq <= self.hi[k]:
+                q5[4] += dq
+                break
+        return q5
 
     # ---------------------------------------------------------------- contacts
     def _grasp_flags(self, side):
@@ -392,6 +507,14 @@ class SysmicPickPlaceEnv(gym.Env):
         c, s = np.cos(self.table_yaw), np.sin(self.table_yaw)
         return (np.asarray(xy) - self.table_center) @ np.array([[c, -s], [s, c]])
 
+    def _sample_table(self, rng):
+        """Random table pose in front of the robot: (centre xy, yaw). The nearest edge is table_gap beyond front_x."""
+        sc = self.cfg.scene
+        yaw = float(rng.uniform(*sc.table_yaw))
+        hx, hy = self.table_half
+        reach_back = hx * abs(np.cos(yaw)) + hy * abs(np.sin(yaw))   # centre -> nearest edge/corner along x
+        return np.array([self.front_x + rng.uniform(*sc.table_gap) + reach_back, rng.uniform(*sc.table_y)]), yaw
+
     def _table_collides(self, clearance=None):
         """True if the table top comes within `clearance` (default SceneConfig.table_clearance) of any robot geom.
 
@@ -424,12 +547,14 @@ class SysmicPickPlaceEnv(gym.Env):
         for n, w, g in zip(order, half_w, gaps):
             y += g + w
             spec = self.specs[n]
-            jx = max(0.0, hx - spec.radius)          # plate / bowl fill the shelf depth: no x jitter
-            if spec.footprint_y < spec.radius:       # has a handle (mug): keep it pointing along x (front/back)
-                yaw = rng.choice([-1.0, 1.0]) * np.pi / 2 + rng.uniform(-0.3, 0.3)
+            if spec.grasp_style == "handle":         # handle points back, roughly at the arm on its side (re-aimed in reset)
+                yaw = np.pi
+                x_lo, x_hi = cx - hx + spec.extent, cx + hx - spec.radius
             else:
                 yaw = rng.uniform(-np.pi, np.pi)
-            poses[n] = (np.array([cx + rng.uniform(-jx, jx), y, z]), float(yaw))
+                x_lo, x_hi = cx - hx + spec.radius, cx + hx - spec.radius
+            x = rng.uniform(x_lo, x_hi) if x_hi > x_lo else (x_lo + x_hi) / 2
+            poses[n] = (np.array([x, y, z]), float(yaw))
             y += w
         return poses
 
@@ -442,8 +567,10 @@ class SysmicPickPlaceEnv(gym.Env):
 
         name = opt.get("object") or str(rng.choice(self.object_names))
         forced = opt.get("arm")
-        bimanual = forced == "both" or (forced is None and name in tc.bimanual_objects
-                                        and rng.random() < tc.bimanual_prob)
+        bimanual = name in tc.bimanual_objects
+        if forced is not None and (forced == "both") != bimanual:
+            raise ValueError(f"{name} is always carried with {'both arms' if bimanual else 'one arm'}; "
+                             f"arm={forced!r} is not allowed (see TaskConfig.bimanual_objects).")
         self._set_active(name, ("left", "right") if bimanual else ("left",))
         self._set_home(None if opt.get("_baseline") else rng)
         mujoco.mj_forward(m, d)
@@ -455,7 +582,7 @@ class SysmicPickPlaceEnv(gym.Env):
         # 1) all utensils in a shuffled row on the shelf; the active one must be reachable by the arm(s) used
         for attempt in range(100):
             poses = self._shelf_row(rng, name, bimanual)
-            pos = poses[name][0]
+            pos, yaw0 = poses[name]
             if bimanual:
                 sides = ("left", "right")
             elif forced in SIDES:
@@ -464,33 +591,40 @@ class SysmicPickPlaceEnv(gym.Env):
                 sides = ("left",) if pos[1] >= 0 else ("right",)
             else:
                 sides = (tc.arm_mode,)
+            if spec.grasp_style == "handle":         # the handle must point at the arm that grasps it
+                yaw0 = self.yaw_to_arm(pos, sides[0]) + rng.uniform(-0.15, 0.15)
+                poses[name] = (pos, yaw0)
             if ((not bimanual or abs(pos[1]) <= tc.bimanual_y_max)
-                    and self.reachable(self.grasp_plan(pos, sides), sides)):
+                    and self.reachable(self.grasp_plan(pos, sides, yaw0), sides)):
                 break
         else:
             self.reach_fallback = True
         self._set_active(name, sides)
 
-        # 2) destination table (x, y, height, yaw) + goal, in reach of the same arm(s), not touching the robot
-        goal_ok = False
-        for attempt in range(300):
-            c = np.array([rng.uniform(*sc.table_x), rng.uniform(*sc.table_y)])
-            top = float(rng.uniform(*sc.table_z))
-            yaw = float(rng.uniform(*sc.table_yaw))
+        # 2) destination table in front of the robot (x, y, yaw; fixed height) + a goal on it, reachable by the
+        #    same arm(s); table poses that touch the robot are rejected
+        goal_ok, top = False, float(sc.table_z)
+        for attempt in range(60):
             if "table_pos" in opt:
-                c, top = np.array(opt["table_pos"][:2], dtype=float), float(opt["table_pos"][2])
-                yaw = float(opt.get("table_yaw", 0.0))
+                tp = opt["table_pos"]
+                c, yaw = np.array(tp[:2], dtype=float), float(opt.get("table_yaw", 0.0))
+                top = float(tp[2]) if len(tp) > 2 else top
+            else:
+                c, yaw = self._sample_table(rng)
             self._place_table(c, top, yaw)
             if "table_pos" not in opt and self._table_collides():
                 continue
-            half = np.maximum(self.table_half - spec.radius - 0.03, 0.0)
-            gxy = (np.array(opt["goal_pos"][:2]) if "goal_pos" in opt
-                   else self.table_to_world(rng.uniform(-1, 1, 2) * half))
-            if np.linalg.norm(gxy - pos[:2]) < tc.min_goal_dist and abs(top - pos[2]) < 0.02:
-                continue
-            goal = np.array([gxy[0], gxy[1], top])
-            if "goal_pos" in opt or "table_pos" in opt or self.reachable(self.grasp_plan(goal, sides), sides):
-                goal_ok = True
+            half = np.maximum(self.table_half - spec.extent - sc.goal_margin, 0.0)
+            for _ in range(20):
+                gxy = (np.array(opt["goal_pos"][:2]) if "goal_pos" in opt
+                       else self.table_to_world(rng.uniform(-1, 1, 2) * half))
+                goal = np.array([gxy[0], gxy[1], top])
+                # the object keeps its yaw while carried, except a mug: its handle stays aimed at the arm
+                gyaw = self.yaw_to_arm(goal, sides[0]) if spec.grasp_style == "handle" else yaw0
+                if "goal_pos" in opt or "table_pos" in opt or self.reachable(self.grasp_plan(goal, sides, gyaw), sides):
+                    goal_ok = True
+                    break
+            if goal_ok:
                 break
         if not goal_ok:
             self.reach_fallback = True

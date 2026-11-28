@@ -2,9 +2,9 @@
 
   uv run python -m sysmic_rl.pickplace.probe [--scene-xml mjcf/sysmic_v2_scene.xml] [--samples 20000]
 
-Reports (0) the shelf the utensils start on and how much of it / of the table range is reachable per object and
-arm mode, (1) reachable grasp-point envelope per arm at lift=0 and lift=max, suggested table height / x-range,
-(2) which gripper angle is open vs closed, (3) mesh-overlap contacts at the home pose.
+Reports (0) the shelf the utensils start on and how much of it / of the table poses is reachable per object,
+(1) the gripper calibration (grasp offset, tool axis, closing axis -> ArmSpec), (2) which gripper angle is open vs
+closed, (3) mesh-overlap contacts at the home pose, (4) the reachable grasp-point envelope per arm.
 """
 from __future__ import annotations
 
@@ -13,11 +13,64 @@ import argparse
 import mujoco
 import numpy as np
 
-from .config import PickPlaceConfig
+from .config import ARMS, PickPlaceConfig
 from .pickplace_env import SIDES, SysmicPickPlaceEnv
 
 
 def pct(a, q): return np.percentile(a, q, axis=0).round(3)
+
+
+def calibrate_gripper(scene_xml, side, rod_r=0.005, depth=0.12):
+    """Gripper geometry in the finger-body frame, from the collision shapes (meshes collide as convex hulls).
+
+    tool_axis  = wrist-roll joint axis (the fingers extend along it).
+    close_axis = direction the jaw moves at the grasp point when the gripper closes (q increasing).
+    grasp_offset = where a rod of radius rod_r, `depth` m along the fingers, rests against the fixed finger's hull
+    (the jaw pushes it there). jaw_q = gripper angle at which the jaw touches it (must be < gripper_close_q).
+    """
+    arm = ARMS[side]
+    spec = mujoco.MjSpec.from_file(str(scene_xml))
+    b = spec.worldbody.add_body(name="calib_rod", pos=[0, 0, 3])
+    b.add_freejoint()
+    b.add_geom(name="calib_rod", type=mujoco.mjtGeom.mjGEOM_CAPSULE, size=[rod_r, 0.02, 0])
+    m = spec.compile()
+    d = mujoco.MjData(m)
+    fb, jb = m.body(arm.finger_body).id, m.body(arm.jaw_body).id
+    fg = next(g for g in range(m.ngeom) if m.geom_bodyid[g] == fb and m.geom_contype[g])
+    jg = next(g for g in range(m.ngeom) if m.geom_bodyid[g] == jb and m.geom_contype[g])
+    jq, rg = m.joint(arm.joints[5]).qposadr[0], m.geom("calib_rod").id
+    ra = m.jnt_qposadr[m.body("calib_rod").jntadr[0]]
+    d.qpos[jq] = m.jnt_range[m.joint(arm.joints[5]).id][0]
+    mujoco.mj_kinematics(m, d)
+    R, p0 = d.xmat[fb].reshape(3, 3).copy(), d.xpos[fb].copy()
+    tool = m.jnt_axis[m.joint(arm.joints[4]).id].copy()                        # wrist roll axis, finger frame
+    jid = m.joint(arm.joints[5]).id
+    hinge = R.T @ (d.xanchor[jid] - p0)
+    axis = R.T @ d.xaxis[jid]
+    pt = depth * tool
+    close = np.cross(axis, pt - hinge)
+    close = close - (close @ tool) * tool
+    close /= np.linalg.norm(close)
+    binormal = np.cross(tool, close)
+    q = np.zeros(4)
+    mujoco.mju_mat2Quat(q, np.column_stack([R @ tool, R @ np.cross(binormal, tool), R @ binormal]).flatten())
+    d.qpos[ra + 3:ra + 7] = q
+    rest = None
+    for s_ in np.arange(-0.02, 0.06, 0.0002):                                  # slide off the finger along -close
+        cand = pt - close * s_
+        d.qpos[ra:ra + 3] = p0 + R @ cand
+        mujoco.mj_kinematics(m, d)
+        if mujoco.mj_geomDistance(m, d, rg, fg, 0.05, None) > 0:
+            rest = cand
+            break
+    jaw_q = None
+    for gq in np.arange(m.jnt_range[jid][0], m.jnt_range[jid][1], 0.005):
+        d.qpos[jq] = gq
+        mujoco.mj_kinematics(m, d)
+        if mujoco.mj_geomDistance(m, d, rg, jg, 0.05, None) <= 0:
+            jaw_q = float(gq)
+            break
+    return {"grasp_offset": rest, "tool_axis": tool, "close_axis": close, "jaw_q": jaw_q}
 
 
 def main():
@@ -44,29 +97,38 @@ def main():
     print("\n== reachability of shelf spawns and table poses (fraction feasible) ==")
     n = 200
     for name in env.object_names:
-        row = []
-        for label, both in (("one-arm", False), ("both-arms", True)):
-            ok = 0
-            for _ in range(n):
-                env._set_active(name, ("left",))
-                p = env._shelf_row(rng, name, both)[name][0]
-                sd = ("left", "right") if both else (("left",) if p[1] >= 0 else ("right",))
-                env._set_active(name, sd)
-                ok += env.reachable(env.grasp_plan(p, sd), sd)
-            row.append(f"{label} {ok / n:.0%}")
+        both = name in cfg.task.bimanual_objects
+        ok = 0
+        for _ in range(n):
+            p, yaw = env._shelf_row(rng, name, both)[name]
+            sd = ("left", "right") if both else (("left",) if p[1] >= 0 else ("right",))
+            env._set_active(name, sd)
+            ok += env.reachable(env.grasp_plan(p, sd, yaw), sd)
         clear = gok = 0
         for _ in range(n):
-            c = np.array([rng.uniform(*cfg.scene.table_x), rng.uniform(*cfg.scene.table_y)])
-            env._place_table(c, rng.uniform(*cfg.scene.table_z), rng.uniform(*cfg.scene.table_yaw))
+            c, tyaw = env._sample_table(rng)
+            env._place_table(c, cfg.scene.table_z, tyaw)
             if env._table_collides():
                 continue
             clear += 1
-            env._set_active(name, ("left", "right") if name in cfg.task.bimanual_objects else ("left",))
-            g = np.array([*env.table_center, env.place_z])
-            gok += env.reachable(env.grasp_plan(g), env.sides)
-        row.append(f"table clear of robot {clear / n:.0%}, + goal reachable {gok / n:.0%}")
-        print(f"  {name:6s} [{env.spec.grasp_style}] " + " | ".join(row))
-    print("  Low numbers => change table_* ranges, the object's grasp_style, or fix gripper/grasp_offset.")
+            half = np.maximum(env.table_half - env.spec.extent - cfg.scene.goal_margin, 0.0)
+            hits = 0
+            for _ in range(20):
+                g = np.array([*env.table_to_world(rng.uniform(-1, 1, 2) * half), env.place_z])
+                hits += env.reachable(env.grasp_plan(g, sd, yaw), sd)
+            gok += hits > 0
+        print(f"  {name:6s} [{env.spec.grasp_style}, {'both arms' if both else 'one arm'}] shelf {ok / n:.0%} | "
+              f"table clear of robot {clear / n:.0%}, + reachable goal on it {gok / n:.0%}")
+    print("  Low numbers => change the riser height (scene XML), table_z/table_gap/table_y, rim/stem/handle_pitch / "
+          "bimanual_rim_angle, or fix gripper/grasp_offset.")
+
+    print("\n== gripper calibration (finger-body frame; compare with ArmSpec in config.py) ==")
+    for s in SIDES:
+        c, arm = calibrate_gripper(cfg.scene.scene_xml, s), ARMS[s]
+        print(f"  {s}: grasp_offset {np.round(c['grasp_offset'], 4)} (config {arm.grasp_offset})  "
+              f"tool_axis {np.round(c['tool_axis'], 3)} (config {arm.tool_axis})")
+        print(f"        close_axis {np.round(c['close_axis'], 3)} (config {arm.close_axis})  jaw touches a 1 cm rod at "
+              f"q={c['jaw_q']:.2f} (gripper_close_q={cfg.task.gripper_close_q} must be larger to squeeze)")
 
     print("\n== home-pose baseline contacts (auto-ignored by the reward) ==")
     for p in env._baseline_pairs:
@@ -105,8 +167,8 @@ def main():
         if len(P0):
             zlow = np.percentile(P0[:, 2], 5)
             band = P0[P0[:, 2] < zlow + 0.08]
-            print(f"  >> {s}: lowest comfortable z ~ {zlow:.3f}. Suggest table_top_z ~ {zlow - 0.01:.3f}; "
-                  f"x-band near that height ~ {pct(band[:,0],[10,90])} (use for spawn_x), y ~ {pct(band[:,1],[10,90])}")
+            print(f"  >> {s}: lowest comfortable grasp z ~ {zlow:.3f}; x near that height ~ {pct(band[:,0],[10,90])}, "
+                  f"y ~ {pct(band[:,1],[10,90])}")
 
 
 if __name__ == "__main__":

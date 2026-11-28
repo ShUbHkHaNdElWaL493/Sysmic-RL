@@ -34,8 +34,9 @@ as the policy, so its outputs are directly usable as supervised labels.
 ### How it works
 1. **Targets:** `env.grasp_plan()` gives, per active arm, the grasp point and tool axis (the same plan the reward uses).
    Pre-grasp = grasp point pulled back along the tool axis by `pre_dist`.
-   * one arm, `top` object: rim, tool **down**; one arm, `side` object: body, tool **forward**;
-   * both arms: left hand on the +y side, right hand on the −y side (`bimanual_style` = `down` or `inward`).
+   * targets = `env.grasp_plan()` (point, tool axis, closing axis): plate/bowl rim with both arms, glass stem, mug handle;
+   * the IK servos the full gripper orientation: tool axis **and** closing direction (`env.grasp_axes()` keeps the arm's heading);
+   * the joint-space seed (`env.seed_config`) already turns the wrist roll so the jaws close the right way.
 2. **Seed** (`SEED` phase, global IK): purely local IK can get stuck at joint limits (e.g. tool pointing up). So the expert first asks
    `env.seed_config()` for the best sampled arm configuration for the pre-grasp pose and moves there **in joint space**.
 3. **Move** (`_goto`): one step of *damped-least-squares IK over all active arms at once*.
@@ -94,9 +95,9 @@ action = expert.act(env)                            # takes the ENV (privileged)
 3. Fix the cause: unreachable target → geometry (`config.py`); wrong sign/offset → `ArmSpec`/gripper angles; contact trouble → `ExpertConfig`.
 4. Repeat; measure with 100 episodes. Object-specific failures usually mean grasp style/offset for that object.
 
-> Grasp height/depth now live in `TaskConfig.side_height_frac` / `top_depth` (the env's grasp plan), not in `ExpertConfig`.
+> Grasp points live in `config.OBJECT_SPECS` and the pitches in `TaskConfig.*_pitch` (the env's grasp plan), not in `ExpertConfig`.
 
-> ⚠ The expert assumes the tool points along `tool_axis` (default +x of the wrist-roll frame) and that `gripper_open_q`/`gripper_close_q` are right. If both are wrong nothing will work — verify with the probe first.
+> The expert relies on the calibrated `ArmSpec` (grasp offset, tool and closing axes) and gripper angles — re-check them with the probe if you change the robot model.
 
 ---
 
@@ -203,5 +204,5 @@ evaluate by running the policy (`training/evaluate.py`), because small per-step 
   from `env._get_obs()`, actions must be in the env's 13-D normalised space, and set `success=True` in attrs. Pass `expert_actions=actions`.
 * **Replace the expert** with a different controller: keep the `reset()` / `act(env) -> (13,)` interface and everything else works.
 * **Change the BC network:** don't edit `bc.py`; change `net` in `training/common.py:build_sac` (BC trains whichever actor it is given).
-* **Add an object style:** extend `grasp_style` logic in `_grasp_targets` (e.g. "handle" grasp for mugs).
+* **Add a grasp style:** extend `SysmicPickPlaceEnv.grasp_plan()` (styles: `rim`, `stem`, `handle`).
 * After changing the expert always re-run `evaluate --expert`, then **re-collect** — old demos reflect the old expert.

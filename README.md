@@ -144,18 +144,24 @@ outputs torques — it nudges targets. This is the same scheme as your original 
         │                     │
    left arm ◄──────── active utensil ──────────► right arm
         │
-        └──── destination TABLE: new x/y/height/yaw every episode, filtered for reach ← the active utensil is PLACED here
+        └──── destination TABLE in front: new x/y/yaw (fixed height) every episode, filtered for reach ← the active utensil is PLACED here
 ```
-* **Shelf.** The `shelf` site in `mjcf/sysmic_v2_scene.xml` marks the shelf on the robot's base (z = 0.496, 13.5 × 45.5 cm). Every reset
+* **Shelf.** The robot's shelf (z = 0.496) is too low for the arms, so the scene XML stands a 15 cm **riser** on it (`shelf_top`,
+  top z = 0.646, 13.5 × 45.5 cm), marked by the `shelf` site. Every reset
   lays all four utensils out along it in shuffled order with random spacing and yaw; the inactive ones are obstacles (touching them is
   a collision and their positions are in the observation). The scene is compiled once: poses are written into `data.qpos`.
-* **Table.** Each reset samples a table centre/height/yaw inside `SceneConfig.table_x/y/z/yaw` (written to `model.body_pos/body_quat`), rejects poses that touch the robot
-  (with `table_clearance` of margin), samples a goal on the table, and rejects it unless the grasp pose there is **reachable**
-  (a kinematic reach cloud built at start-up: 50 000 random arm configurations per arm).
-* **One arm or both.** Objects in `TaskConfig.bimanual_objects` (default plate, bowl) are carried with **both** arms: left hand on
-  the +y rim, right hand on the −y rim, both must have finger+jaw contact to count as "grasped", and the expert drives both
-  arms with one joint IK so they close, lift and release together. Other objects use one arm (the side the object is on).
-  Probability per episode: `bimanual_prob` (1.0 = always for those objects).
+* **Table.** The top height is constant (`SceneConfig.table_z` = 0.85). Each reset samples a yaw in `table_yaw` and a centre y in
+  `table_y`, and puts the table's nearest edge `table_gap` in front of the shelf (written to `model.body_pos/body_quat`). It rejects
+  poses that touch the robot (with `table_clearance` of margin), samples a goal on the table, and rejects it unless the grasp pose there is **reachable**
+  (a reach cloud built at start-up: 50 000 random arm configurations per arm, collision-free ones kept; ~10 s).
+* **Utensils.** Realistic shapes (smooth meshes + hollow primitive collision): a parabolic plate, a bowl, a wine glass with a thin stem,
+  a hollow mug with a looped handle. **Grasps:** plate/bowl by the rim (jaw outside, finger inside), the glass by its **stem**, the mug by
+  its **handle** (aimed at the grasping arm). The 5-joint arms fix the tool heading, so a grasp prescribes the tool's pitch
+  (`rim_pitch`/`stem_pitch`/`handle_pitch`) and the closing direction; the gripper geometry is calibrated (`ArmSpec`, `probe`).
+* **One arm or both.** Objects in `TaskConfig.bimanual_objects` (default plate, bowl) are **always** carried with **both** arms:
+  the hands grip the rim `bimanual_rim_angle` (0.8 rad) either side of the robot-facing point (left hand +y, right hand −y), both
+  must have finger+jaw contact to count as "grasped", and the expert drives both arms with one joint IK so they close, lift and
+  release together. Other objects always use one arm (the side the object is on); `reset(options={"arm": ...})` cannot override this.
 
 ---
 
@@ -186,7 +192,7 @@ uv add stable-baselines3 h5py tensorboard
 uv add --dev pytest
 uv run pytest
 ```
-Runs the environment, expert and demo pipeline on the real scene. **Success:** `18 passed`.
+Runs the environment, expert and demo pipeline on the real scene. **Success:** `22 passed` (≈1 min: every env builds its reach cloud).
 (If pytest fails to load a `launch_testing` plugin, ROS is on your `PYTHONPATH`: run `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest`.)
 
 ### Stage 1 — calibrate (the most important stage)
@@ -194,10 +200,11 @@ Runs the environment, expert and demo pipeline on the real scene. **Success:** `
 uv run python -m sysmic_rl.pickplace.probe
 ```
 Prints (a) the **shelf** rectangle and how far below the arm bases it is,
-(b) what fraction of shelf spawns and table poses are **reachable** per utensil, for one arm and for both arms,
-(c) which gripper angle is open/closed, (d) rest-pose contacts and the reachable envelope.
-Then edit `pickplace/config.py`: the `table_*` ranges, `gripper_open_q`,
-`gripper_close_q`, `arm_home`, each `ArmSpec.grasp_offset`. See [pickplace §Calibration](src/sysmic_rl/pickplace/README.md#calibration).
+(b) what fraction of shelf spawns and table poses are **reachable** per utensil,
+(c) the gripper calibration (grasp offset, tool and closing axis vs `ArmSpec`), (d) which gripper angle is open/closed,
+(e) rest-pose contacts and the reachable envelope.
+Then edit `pickplace/config.py`: `table_z` / `table_gap` / `table_y`, the grasp pitches, `bimanual_rim_angle`
+(the gripper geometry and angles are already calibrated). See [pickplace §Calibration](src/sysmic_rl/pickplace/README.md#calibration).
 **Success:** reachability percentages are high (≳70 %) for the objects you care about; you know which gripper angle is "open".
 
 ### Stage 2 — look at it
@@ -205,7 +212,7 @@ Then edit `pickplace/config.py`: the `table_*` ranges, `gripper_open_q`,
 uv run python -m sysmic_rl.training.evaluate --expert --episodes 3 --render
 ```
 Opens the MuJoCo viewer. **Check by eye:** is the red goal sphere on the table? Does the gripper end up around
-the object? Does it close on it? If the grasp point is visibly off, tune `grasp_offset`.
+the object? Does it close on it? If the grasp point is visibly off, re-run the probe's gripper calibration.
 
 ### Stage 3 — measure the expert
 ```bash
@@ -273,10 +280,10 @@ Per-object and per-arm success rates are printed.
 | I want to… | Edit | Then you must… |
 |---|---|---|
 | Change where the table may appear / its size | `SceneConfig.table_*` in `config.py` | re-run probe + stage 2 |
-| Change where the utensils start | the `shelf` site + `shelf_top` geom in `mjcf/sysmic_v2_scene.xml` | re-run probe |
-| Which objects are carried with both hands | `TaskConfig.bimanual_objects`, `bimanual_prob`, `bimanual_style` | re-collect demos |
+| Change where the utensils start / riser height | the `shelf` site + `shelf_top` geom in `mjcf/sysmic_v2_scene.xml` | re-run probe |
+| Which objects are carried with both hands / how they are gripped | `TaskConfig.bimanual_objects`, `bimanual_rim_angle`, `*_pitch`; `OBJECT_SPECS` grasp point | re-collect demos |
 | Change gripper angles / home pose | `TaskConfig` | re-run stage 3 onward |
-| Add or edit a utensil (shape, size, mass) | `mjcf/sysmic_v2_scene.xml` + `OBJECT_SPECS` (+ `SceneConfig.objects`) | **re-collect demos & retrain** (obs size changes if you add an object) |
+| Add or edit a utensil (shape, size, mass) | `mjcf/sysmic_v2_scene.xml` (+ visual mesh in `mjcf/meshes/utensils/`) + `OBJECT_SPECS` (+ `SceneConfig.objects`) | **re-collect demos & retrain** (obs size changes if you add an object) |
 | Change what is rewarded | `RewardConfig` / `_reward_and_flags()` | **re-collect demos** (they store old rewards) and restart RL |
 | Change how fast joints move | `TaskConfig.*_action_scale`, `ema_alpha` | re-collect demos & retrain |
 | Add something to the observation | `_obs_parts()` | **everything downstream is invalidated** (dims change) |
@@ -318,9 +325,9 @@ term the agent farms (e.g. hovering near the object collects `reach` forever). F
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `ValueError` loading the scene XML | wrong scene path | `--scene-xml …` or `export SYSMIC_SCENE_XML=…` |
-| Expert stuck in `seed`/`pre`/`approach` | target unreachable or wrong tool axis | probe reachability %, widen `table_*`, check `ArmSpec.tool_axis`, try `bimanual_style="inward"` |
+| Expert stuck in `seed`/`pre`/`approach` | target unreachable or wrong tool axis | probe reachability %, tune `table_gap`/`table_z`/grasp pitches; the expert has no collision avoidance (see §10) |
 | `RuntimeWarning: No reachable table pose found` | `table_*` ranges don't intersect the arms' reach | probe; widen/shift ranges (info key `reach_fallback` marks those episodes) |
-| Plate grasp never closes on both sides | grasp offset / gripper sign / rim position | probe gripper sweep; tune `ArmSpec.grasp_offset`, `bimanual_style` |
+| Plate grasp never closes on both sides | grasp offset / gripper sign / rim position | probe gripper sweep; tune `ArmSpec.grasp_offset`, `bimanual_rim_angle` (hands too close → collide) |
 | Expert grasps but object slips | friction / grip force / wrong gripper sign | check `gripper_close_q`; add pad geoms; raise friction |
 | `n_bad_contacts` always > 0 | rest-pose mesh overlap | probe lists them; they're auto-ignored at home pose, otherwise add `<exclude>` to your MJCF |
 | BC val loss fine, rollouts bad | distribution shift | DAgger rounds, more demos with `--noise 0.1`–`0.2` |
@@ -331,7 +338,10 @@ term the agent farms (e.g. hovering near the object collects `reach` forever). F
 
 ## 10. Scope & limitations (honest status)
 
-* Tested on the real `sysmic_v2_scene.xml`. **Calibration is still required** before the expert works: with the current `grasp_offset` / gripper guesses the probe reports low reachability for the shelf and the table (see Stage 1).
+* Tested on the real `sysmic_v2_scene.xml`. Gripper geometry is calibrated and every reset finds a reachable layout, but the **scripted expert
+  does not complete episodes yet**: it is a plain IK servo without collision avoidance, the utensils sit ~1 cm apart on the shelf, the robot's
+  meshes collide as convex hulls (the lift carriage especially), and the top-heavy wine glass tips when bumped. Next step: collision-aware
+  motion (waypoints / a planner) for the expert.
 * The torch/SB3 scripts (`bc.py`, `train_sac.py`, `common.py`) were not executed during development — expect small fixes.
 * State-based observations (perfect object pose). Vision would be a later distillation step.
 * One environment instance per training run (demo pre-fill assumes it).

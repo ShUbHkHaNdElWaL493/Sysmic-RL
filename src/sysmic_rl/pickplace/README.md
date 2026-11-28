@@ -31,7 +31,7 @@ while True:
 
 ```
  ALL utensils START in a row   ──►  the active one is carried by     ──►  PLACED on a table
- on the robot's shelf               ONE arm or BOTH arms                   (new x, y, height, yaw every episode,
+ on the shelf riser                 ONE arm or BOTH arms                   in front (new x, y, yaw every episode,
  (shuffled order/spacing/yaw)       (plate, bowl: both; glass, mug: one)    filtered for reachability)
 ```
 
@@ -43,14 +43,26 @@ One static file, compiled once per env. It `<include>`s `sysmic_v2.xml` (never e
 
 | Element | What | Rewritten at every `reset()` |
 |---|---|---|
-| site `shelf` | usable top of the shelf on `base_link` (z = 0.496, 13.5 × 45.5 cm) | — (read once) |
-| geom `shelf_top` | invisible (group 3) collision box whose top face is the shelf surface | — |
+| site `shelf` | usable top of the riser (z = 0.646, 13.5 × 45.5 cm) | — (read once) |
+| geom `shelf_top` | 15 cm riser standing on the robot's shelf (z = 0.496); the utensils rest on it (the robot's shelf alone is below the arms' reach) | — |
 | `<contact><exclude>` base_link ↔ each utensil | MuJoCo collides the `base_link` mesh as its **convex hull**, which fills the shelf recess; the utensils ignore the hull and rest on `shelf_top` instead | — |
-| body `table` (geom `table_top` + 4 visual legs) | destination table; body origin = centre of the top face | `model.body_pos` (x, y, height) + `model.body_quat` (yaw) |
-| bodies `obj_plate/glass/bowl/mug` (free joints) | utensils, origin = centre of the base bottom | `data.qpos` (row on the shelf) |
+| body `table` (geom `table_top` + 4 visual legs) | destination table; body origin = centre of the top face; top at a fixed 0.85 m (= `table_z`) | `model.body_pos` (x, y) + `model.body_quat` (yaw) |
+| bodies `obj_plate/glass/bowl/mug` (free joints) | utensils, origin = centre of the base bottom (details below) | `data.qpos` (row on the shelf) |
+| `<option><flag multiccd>` | several contact points between convex shapes, so the utensil bases rest flat instead of rocking/sinking | — |
+| more `<contact><exclude>` | robot links two joints apart whose convex hulls overlap although the real parts never touch (wrist↔jaw, arm base↔upper arm, shoulder pan↔forearm) | — |
 
-The legs are long enough for the highest table and simply sink below the (opaque) floor for lower tables, so no geom is resized at runtime.
-Utensil dimensions used by the code live in `config.OBJECT_SPECS` — keep them in sync with the XML geometry.
+**Utensils.** Each has a smooth visual mesh (`mjcf/meshes/utensils/*.obj`, group 2, no collision) and invisible primitive
+collision geoms (group 3) that keep the real shape — a mesh would collide as its convex hull, filling the hollow parts and the handle's hole.
+Masses come from the collision geoms.
+
+| Utensil | Shape | Grasped at |
+|---|---|---|
+| plate | parabolic dish, Ø 12.4 cm, rim 2.2 cm high, 3 mm wall, 0.20 kg | rim, both arms |
+| bowl | elliptical bowl with a foot, Ø 13 cm × 5 cm, 3 mm wall, 0.25 kg | rim, both arms |
+| glass | wine glass: Ø 6 cm foot, 9 mm × 5.8 cm stem, hollow 7 cm bowl, 14 cm tall, 0.15 kg | **stem**, one arm |
+| mug | hollow, 8 mm solid base, Ø 7.2 × 8.5 cm, handle loop (1 cm bar, 1.9 × 3.5 cm hole) on local +x, 0.28 kg | **handle** (outer bar), one arm |
+
+Utensil dimensions used by the code live in `config.OBJECT_SPECS` (incl. the grasp point: `grasp_r`, `grasp_z`, `wall_slope`) — keep them in sync with the XML geometry.
 
 **Adding a utensil:** add an `obj_<name>` body with a free joint (and an `<exclude>` against `base_link`) to the XML, its spec to `OBJECT_SPECS`,
 the name to `SceneConfig.objects`, then **re-collect demos and retrain** (the observation grows). All utensils must fit in a row on the shelf.
@@ -67,8 +79,12 @@ Dataclasses nested into `PickPlaceConfig(scene, task, reward)`. Override fields 
 | `joints` | 6 joint names: pan, shoulder, elbow, wrist_flex, wrist_roll, **gripper** (in this order — code relies on it) |
 | `finger_body` | body whose frame the grasp point is attached to (`arm_*_wrist_roll_link`, carries the fixed finger) |
 | `jaw_body` | the moving jaw body (used to detect "jaw touches object") |
-| `grasp_offset` | grasp point **in the finger body's frame**, metres. Default = the jaw's centre of mass. **A guess — calibrate it.** |
-| `tool_axis` | direction the tool "points", in the finger body frame (default +x). The expert aligns it with down / forward / inward |
+| `grasp_offset` | grasp point **in the finger body's frame**: where a ~1 cm object rests against the fixed finger when clamped, 3 cm behind the tip (0.120, ±0.0027, 0.0047) |
+| `tool_axis` | direction the fingers point, in the finger body frame = the wrist-roll axis (+x) |
+| `close_axis` | direction the jaw moves when closing, in the finger body frame: (0, ∓0.5, −0.866). The fixed finger is on the opposite side of the object |
+
+All three are **calibrated** from the MJCF collision shapes by `probe.calibrate_gripper()` (and checked by a test). The grasp point is ~6 mm
+from the wrist-roll axis, so the wrist roll turns the closing direction without moving the grasp point.
 
 ### `SceneConfig`
 | Field | Default | Meaning |
@@ -76,10 +92,12 @@ Dataclasses nested into `PickPlaceConfig(scene, task, reward)`. Override fields 
 | `scene_xml` | `mjcf/sysmic_v2_scene.xml` (or `$SYSMIC_SCENE_XML`) | the scene file |
 | `objects` | plate, glass, bowl, mug | utensils (must exist in the XML). **Order and length change the observation size** |
 | `shelf_site`, `shelf_min_gap` | `"shelf"`, 0.01 | site the row is laid out in; min free space between neighbours |
-| `table_x`, `table_y`, `table_z` | (0.35,0.65), (−0.25,0.25), (0.55,1.05) | ranges the table **centre** and **top height** are sampled from each episode |
+| `table_z` | 0.85 | constant table top height (must match the XML) |
+| `table_gap`, `table_y` | (0, 0.08), (−0.15, 0.15) | nearest table edge this far beyond the front limit (shelf front + `table_clearance`); table centre y |
+| `goal_margin` | 0.01 | min distance of the placed object's footprint from the table edge |
 | `table_yaw` | (−π/2, π/2) | table yaw range (covers every orientation of a rectangle). Table size comes from the XML |
 | `table_clearance` | 0.03 | the table must be at least this far from every robot geom (`base_link` = its convex hull) |
-| `reach_check` | True | filter object/table poses with the reach cloud (disable to skip the ~1 s start-up cost) |
+| `reach_check` | True | filter object/table poses with the reach cloud (disable to skip the ~10 s start-up cost) |
 | `reach_samples` | 50 000 | random arm configurations per arm in the reach cloud |
 | `reach_tol` | 0.04 | grasp point must be within this distance of a reachable sample |
 | `reach_axis_tol` | 0.5 rad | …and that sample's tool axis must be this close to the required one |
@@ -91,12 +109,12 @@ Dataclasses nested into `PickPlaceConfig(scene, task, reward)`. Override fields 
 | Smoothing | `ema_alpha` (0.25) | lower = smoother but laggier |
 | Speeds | `arm_action_scale` (0.03 rad/step), `gripper_action_scale` (0.08), `lift_action_scale` (0.002 m/step) | max target movement per step at action = 1 |
 | Anti-windup | `arm_max_lag`, `gripper_max_lag`, `lift_max_lag` | target may not get further than this from the actual joint |
-| Gripper | `gripper_open_q` (1.2), `gripper_close_q` (−0.1) | **guess — probe tells you which is open** |
+| Gripper | `gripper_open_q` (−0.1), `gripper_close_q` (1.75) | from the probe's sweep (jaw↔finger 0.059 m at −0.17, 0.035 m at 1.75) |
 | Home | `arm_home`, `home_noise`, `lift_home_range` | start pose of every episode |
-| Grasp geometry | `side_height_frac` (0.6), `top_depth` (0.006) | where on the object the grasp point sits |
-| **Bimanual** | `bimanual_objects` (plate, bowl), `bimanual_prob` (1.0), `bimanual_y_max` (0.10), `bimanual_style` (`"down"`/`"inward"`) | see [Bimanual episodes](#bimanual) |
+| Grasp pitch | `rim_pitch` (0.9), `stem_pitch` (1.0), `handle_pitch` (0.7) rad | tool axis pitched down from horizontal per grasp style (the heading follows the arm) |
+| **Bimanual** | `bimanual_objects` (plate, bowl), `bimanual_y_max` (0.10), `bimanual_rim_angle` (0.8 rad) | see [Bimanual episodes](#bimanual) |
 | Success | `place_tol_xy` (2 cm), `place_tol_z`, `place_max_tilt`, `place_max_speed`, `hold_steps` (10) | all must hold together for `hold_steps` |
-| Failure / shaping | `fail_tilt`, `lift_target` (0.08 m), `min_goal_dist` (0.10 m) | |
+| Failure / shaping | `fail_tilt`, `lift_target` (0.08 m) | |
 | Randomisation | `randomize_physics`, `friction_scale`, `mass_scale` | |
 
 ### `RewardConfig`
@@ -129,31 +147,39 @@ Weights of each reward term; see [Reward](#reward).
 | `others_pos` | 9 | positions of the 3 inactive utensils (obstacles), in `objects` order |
 
 ### `grasp_plan()` — the central geometric helper
-`env.grasp_plan(obj_pos=None, sides=None) -> {side: (grasp_point, tool_axis)}` is used by the reward, observation, reach filter and expert.
-* One arm, `top` object: rim point on the robot-facing side, tool **down**. One arm, `side` object: body at `side_height_frac`, tool **forward** (+x).
-* Both arms: left hand on the **+y** side, right hand on the **−y** side, at radius `rim_radius` (top) or `radius` (side).
+`env.grasp_plan(obj_pos=None, sides=None, obj_yaw=None) -> {side: (grasp_point, tool_axis, close_axis)}` is used by the reward,
+observation, reach filter and expert. The arms have 5 joints (shoulder, elbow and wrist-flex bend in one plane), so the tool **heading is
+not free**: for rim/stem grasps only the pitch is prescribed and the heading is the arm's (`heading()`; `grasp_axes(side, tool_now)` keeps the
+current one). The reach check compares only the pitch for those.
+* `rim` (plate, bowl): point on the rim wall (`grasp_r`, `grasp_z`); pitch `rim_pitch`; the jaw closes across the wall **from the outside**
+  (the thick fixed finger goes inside the dish). One arm: robot-facing point; both arms: `bimanual_rim_angle` either side of it (left +y, right −y).
+* `stem` (glass): point on the stem axis at `grasp_z`; pitch `stem_pitch`; the jaws close horizontally across the stem.
+* `handle` (mug): the handle's outer bar; the tool points along the handle towards the body (pitch `handle_pitch`) and the jaws close on the
+  loop's flat sides. This fixes the full tool direction, so `reset()` aims the handle at the grasping arm (`yaw_to_arm()`), and the reach
+  check at the goal assumes it stays aimed at the arm while carried.
 
 ### <a name="bimanual"></a>Bimanual episodes
-* Chosen per episode if the object is in `bimanual_objects` and `rng < bimanual_prob` (or force with `reset(options={"arm": "both"})`; `"left"`/`"right"` force one arm).
+* **Always** for objects in `bimanual_objects`, never for the others. `reset(options={"arm": ...})` only picks the side of a single-arm
+  object; asking for the wrong mode raises `ValueError`.
 * The active utensil is put in a middle slot of the shelf row and must satisfy `|y| ≤ bimanual_y_max`, so both hands can reach opposite sides.
 * "Grasped" = **every** active arm has finger **and** jaw contact. Reward `reach` = mean distance of both hands to their planned points.
-* `bimanual_style="down"`: both tools point down onto opposite rims (pinch from above). `"inward"`: tools point at each other horizontally (squeeze from the sides). Try the other if one never reaches.
+* Smaller `bimanual_rim_angle` = hands further from the neighbouring utensils on the shelf, but closer to each other (the reach check ignores hand↔hand collisions).
 * `info["arm"] == "both"`; `evaluate.py` reports it as `arm:both`.
 
 ### `reset(seed, options)`
 1. Choose object and arm(s); set home pose (random lift, small joint noise).
 2. **Shelf row:** all utensils in shuffled order along the shelf, random spacing (Dirichlet split of the spare width), x jitter where the
-   shelf depth allows (none for plate/bowl), random yaw (the mug's handle stays pointing front/back). Up to 100 tries until the active
+   shelf depth allows (none for plate/bowl), random yaw (the mug's handle is aimed at the grasping arm, ±0.15 rad). Up to 100 tries until the active
    utensil's grasp plan is reachable (and |y| small enough if bimanual).
-3. **Table:** sample centre/height/yaw in `table_*`; reject if it is within `table_clearance` of the robot (checked with `mj_geomDistance`:
+3. **Table:** sample yaw and centre y, put the nearest edge `table_gap` beyond `front_x`, top at `table_z`; reject if it is within `table_clearance` of the robot (checked with `mj_geomDistance`:
    the table and `base_link` are both world-welded, so MuJoCo would never report a contact between them) or the goal's grasp plan is
-   unreachable; the goal is sampled in the table frame, ≥ `min_goal_dist` from the object.
+   unreachable (up to 60 table poses × 20 goals); the goal is sampled in the table frame, `goal_margin` inside the edge.
 4. Randomise friction/mass of the active utensil; write all utensil poses; settle 30 steps; move the red goal marker.
 5. If nothing feasible is found: `info["reach_fallback"]=True` (and a `RuntimeWarning` for the table) — your ranges don't match the arms' reach.
 
-Options: `object`, `arm`, `goal_pos=(x,y)`, `table_pos=(x,y,z)` (+ `table_yaw`). Example:
+Options: `object`, `arm` (side of a single-arm object), `goal_pos=(x,y)`, `table_pos=(x,y)` or `(x,y,z)` (+ `table_yaw`). Example:
 ```python
-env.reset(seed=1, options={"object": "plate", "arm": "both", "table_pos": (0.45, 0.0, 0.8), "table_yaw": 0.3, "goal_pos": (0.40, 0.05)})
+env.reset(seed=1, options={"object": "plate", "table_pos": (0.55, 0.0), "table_yaw": 0.3, "goal_pos": (0.36, 0.0)})
 ```
 
 ### `step(action)` — see [README §4](../../../README.md#4-what-happens-during-one-environment-step)
@@ -178,14 +204,17 @@ Allowed contacts (not penalised): any arm geom with the **active** utensil; fing
 Touching an inactive utensil is a collision. Failure: object below `min(table top, shelf height) − 0.25 m`, or tilt > `fail_tilt`.
 
 ### Helper methods used by other modules
-`grasp_point(side)`, `tool_axis_world(side)`, `grasp_plan()`, `reachable(plan, sides)`, `seed_config(goals)`, `object_pos()`, `is_grasping()`, `joint_pos()`,
+`grasp_point(side)`, `tool_axis_world(side)`, `close_axis_world(side)`, `grasp_plan()`, `grasp_axes(side, tool_now)`, `close_signed()`,
+`reachable(plan, sides)`, `seed_config(goals)`, `object_pos()`, `object_yaw()`, `is_grasping()`, `joint_pos()`,
 `arm_dofs(side)`, `table_to_world(uv)` / `world_to_table(xy)`, attributes `sides`, `target`, `act_scale`, `action_mask`, `sl`, `lift_dof`, `finger_bid`, `goal_pos`, `shelf`, `spec`.
 The **expert** relies on them — update `imitation/expert.py` if you rename one.
 
 ### Reachability (why episodes are always feasible)
-At start-up the env samples `reach_samples` random (lift, 5 joints) configurations per arm and stores grasp point, tool axis and joints (kinematics only, ~1 s).
-`reachable()` asks: is there a sample whose grasp point is within `reach_tol` of the plan point **and** whose tool axis is within `reach_axis_tol` of the required one?
-`seed_config()` returns the best sample as a starting pose for the expert. This is a *necessary-ish* test (it ignores collisions and joint dynamics), not a proof.
+At start-up the env samples `reach_samples` random (lift, 5 joints) configurations per arm and keeps those where the arm touches neither
+the robot, itself, the other arm (at home) nor the riser (~65 % survive; ~10 s). Each sample stores grasp point, tool axis, closing axis and joints.
+`reachable()` asks: is there a sample whose grasp point is within `reach_tol` of the plan point **and** whose tool axis (pitch only for rim/stem)
+is within `reach_axis_tol`? The closing direction is free (wrist roll). `seed_config()` returns the best sample, with the wrist roll turned so
+the jaws close the right way, as a starting pose for the expert. Still a *necessary-ish* test: utensils, the table and the path there are ignored.
 
 ---
 
@@ -196,11 +225,11 @@ uv run python -m sysmic_rl.pickplace.probe --samples 20000      # [--scene-xml m
 ```
 Sections:
 1. **Shelf** — the site rectangle and how far below the arm bases it is at lift 0 / max.
-2. **Reachability** — per utensil: % of shelf spawns reachable with one arm and with both arms, % of random table poses clear of the robot, and % that also have a reachable goal.
-   Low numbers tell you what to change: widen/shift `table_*`, give the object a different `grasp_style`, fix `grasp_offset`/gripper angles, relax `reach_axis_tol`.
-3. **Home-pose contacts** (auto-ignored by the reward). 4. **Gripper sweep** — smaller jaw↔finger distance = closed → set `gripper_open_q/close_q`. 5. **Reachable envelope** for hand-tuning.
-
-After the probe, *look* at the scene (`render_mode="human"`) and move `ArmSpec.grasp_offset` until the grasp point sits between the fingers.
+2. **Reachability** — per utensil (its arm mode): % of shelf spawns reachable, % of random table poses clear of the robot, and % that also have a reachable goal.
+   Low numbers tell you what to change: `table_*`, the grasp pitches, `bimanual_rim_angle`, relax `reach_axis_tol`.
+3. **Gripper calibration** — `calibrate_gripper()` recomputes `grasp_offset`, `tool_axis`, `close_axis` from the collision shapes and the jaw
+   angle that clamps a 1 cm rod; compare with `ArmSpec`. 4. **Home-pose contacts** (auto-ignored by the reward).
+5. **Gripper sweep** — smaller jaw↔finger distance = closed → `gripper_open_q/close_q`. 6. **Reachable envelope** for hand-tuning.
 
 ---
 
@@ -209,7 +238,7 @@ After the probe, *look* at the scene (`render_mode="human"`) and move `ArmSpec.g
 | Change | How | Watch out for |
 |---|---|---|
 | Different table range | `SceneConfig.table_*` | re-run probe; check "goal reachable" |
-| Different table size / shelf | edit `table_top` / the `shelf` site + `shelf_top` geom in the scene XML | verify with probe + viewer |
+| Different table size / height / riser | edit `table_top` (+ `table_z`) / the `shelf` site + `shelf_top` geom in the scene XML | verify with probe + viewer |
 | New reward term | add to `terms` in `_reward_and_flags()` + `RewardConfig` | demos store old rewards → re-collect |
 | New observation | `_obs_parts()` | dims change → demos/models invalid |
 | More bimanual objects | `TaskConfig.bimanual_objects` | re-collect; check probe "both-arms" % |

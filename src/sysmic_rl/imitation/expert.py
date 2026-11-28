@@ -45,21 +45,24 @@ class ScriptedExpert:
         self.seed = None
 
     def _goto(self, env, goals):
-        """goals: {side: (target_point, tool_axis, gripper_q)} -> (action[13], max_pos_err, max_axis_err)."""
+        """goals: {side: (target_point, tool_axis, close_axis, gripper_q)} -> (action[13], max_pos_err, max_axis_err).
+
+        Full orientation: the tool axis AND the (sign-free) closing direction of the jaws are servoed."""
         c, m, d = self.cfg, env.model, env.data
         sides = list(goals)
         cols = [env.lift_dof] + [int(x) for s in sides for x in env.arm_dofs(s)[:5]]
         J_rows, e_rows, pos_err, ax_err = [], [], 0.0, 0.0
         for s in sides:
-            tp, tax, _ = goals[s]
-            pt, a = env.grasp_point(s), env.tool_axis_world(s)
+            tp, tax, tcl, _ = goals[s]
+            pt, a, cl = env.grasp_point(s), env.tool_axis_world(s), env.close_axis_world(s)
+            if not env.close_signed() and cl @ tcl < 0:
+                tcl = -tcl                            # symmetric grasp: either closing sense will do
             jp, jr = np.zeros((3, m.nv)), np.zeros((3, m.nv))
             mujoco.mj_jac(m, d, jp, jr, pt, env.finger_bid[s])
-            proj = np.eye(3) - np.outer(a, a)   # ignore rotation about the tool axis (wrist roll stays free)
-            J_rows += [jp[:, cols], c.rot_weight * (proj @ jr[:, cols])]
-            e_rows += [c.pos_gain * (tp - pt), c.rot_weight * c.rot_gain * np.cross(a, tax)]
+            J_rows += [jp[:, cols], c.rot_weight * jr[:, cols]]
+            e_rows += [c.pos_gain * (tp - pt), c.rot_weight * c.rot_gain * (np.cross(a, tax) + np.cross(cl, tcl))]
             pos_err = max(pos_err, float(np.linalg.norm(tp - pt)))
-            ax_err = max(ax_err, float(np.arccos(np.clip(a @ tax, -1, 1))))
+            ax_err = max(ax_err, float(np.arccos(np.clip(a @ tax, -1, 1))), float(np.arccos(np.clip(cl @ tcl, -1, 1))))
         J, e = np.vstack(J_rows), np.concatenate(e_rows)
         cs = np.ones(len(cols))
         cs[0] = c.lift_col_scale
@@ -75,7 +78,7 @@ class ScriptedExpert:
             idx = np.arange(sl.start, sl.start + 5)
             act[idx] = (cur[idx] + dq[k:k + 5] - tgt[idx]) / sc[idx]
             g = sl.stop - 1
-            act[g] = (goals[s][2] - tgt[g]) / sc[g]
+            act[g] = (goals[s][3] - tgt[g]) / sc[g]
             k += 5
         return np.clip(act, -1, 1), pos_err, ax_err
 
@@ -92,7 +95,8 @@ class ScriptedExpert:
         o = env.object_pos()
         grasping = env.is_grasping()
         timeout = self.t > c.phase_timeout
-        G = lambda tgt, gq: {s: (tgt[s], plan[s][1], gq) for s in sides}
+        ax = {s: env.grasp_axes(s, env.tool_axis_world(s)) for s in sides}    # heading follows the arm
+        G = lambda tgt, gq: {s: (tgt[s], ax[s][0], ax[s][1], gq) for s in sides}
 
         if self.phase in (LIFT, TRANSPORT, LOWER):  # recovery when the object is lost
             self.lost = 0 if grasping else self.lost + 1
@@ -124,7 +128,7 @@ class ScriptedExpert:
                 if err < c.seed_tol or timeout:
                     self._advance(PRE)
         elif ph == PRE:
-            a, ep, er = self._goto(env, G({s: plan[s][0] - plan[s][1] * c.pre_dist for s in sides}, gq_open))
+            a, ep, er = self._goto(env, G({s: plan[s][0] - ax[s][0] * c.pre_dist for s in sides}, gq_open))
             if (ep < c.pos_tol * 1.5 and er < c.axis_tol) or timeout:
                 self._advance(APPROACH)
         elif ph == APPROACH:
@@ -157,7 +161,7 @@ class ScriptedExpert:
             if self.t >= c.release_steps:
                 self._advance(RETREAT)
         elif ph == RETREAT:
-            a, _, _ = self._goto(env, G({s: pts[s] - plan[s][1] * c.retreat_dist for s in sides}, gq_open))
+            a, _, _ = self._goto(env, G({s: pts[s] - ax[s][0] * c.retreat_dist for s in sides}, gq_open))
             if self.t > 25:
                 self._advance(DONE)
         else:

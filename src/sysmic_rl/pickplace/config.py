@@ -18,22 +18,25 @@ SCENE_XML = os.environ.get("SYSMIC_SCENE_XML", str(WS_ROOT / "mjcf" / "sysmic_v2
 
 @dataclass(frozen=True)
 class ObjectSpec:
-    """Metadata for a utensil defined in the scene XML (body `obj_<name>`, origin = centre of the base bottom)."""
+    """Metadata for a utensil defined in the scene XML (body `obj_<name>`, origin = centre of the base bottom, +z up)."""
     name: str
     height: float
-    radius: float        # outer footprint radius
-    mass: float
-    grasp_style: str     # "top" (pinch the rim from above) | "side" (wrap the body)
-    rim_radius: float    # axis -> rim distance used by the expert for "top"
-    footprint_y: float   # half-width along the shelf (y) when spawned (mug: handle turned along x)
+    radius: float        # largest radius of the body around its axis (handle excluded)
+    extent: float        # largest horizontal distance from the axis (handle included)
+    grasp_style: str     # "rim" (pinch the rim wall) | "stem" (close on the stem) | "handle" (close on the handle's outer bar)
+    grasp_r: float       # horizontal distance axis -> grasp point (rim wall / handle bar; 0 for a stem on the axis)
+    grasp_z: float       # height of the grasp point above the base
+    wall_slope: float    # "rim": wall angle from horizontal at the grasp point (the jaws close across the wall)
+    footprint_y: float   # half-width along the shelf (y) when spawned
 
 
-# Must match the geometry in mjcf/sysmic_v2_scene.xml.
+# Must match the geometry in mjcf/sysmic_v2_scene.xml (see the comment above each utensil body there).
 OBJECT_SPECS = {
-    "plate": ObjectSpec("plate", 0.0236, 0.065, 0.25, "top", 0.062, 0.065),
-    "bowl": ObjectSpec("bowl", 0.0443, 0.0675, 0.30, "top", 0.066, 0.0675),
-    "glass": ObjectSpec("glass", 0.09, 0.03, 0.20, "side", 0.0, 0.03),
-    "mug": ObjectSpec("mug", 0.08, 0.047, 0.25, "side", 0.0, 0.035),
+    #                         height  radius extent  style     grasp_r grasp_z slope  footprint_y
+    "plate": ObjectSpec("plate", 0.022, 0.062, 0.062, "rim", 0.059, 0.0187, 0.527, 0.062),
+    "bowl": ObjectSpec("bowl", 0.050, 0.065, 0.065, "rim", 0.0626, 0.042, 1.355, 0.065),
+    "glass": ObjectSpec("glass", 0.140, 0.035, 0.035, "stem", 0.0, 0.035, 0.0, 0.035),
+    "mug": ObjectSpec("mug", 0.085, 0.036, 0.065, "handle", 0.060, 0.0475, 0.0, 0.036),   # handle on local +x
 }
 
 
@@ -41,23 +44,30 @@ OBJECT_SPECS = {
 class ArmSpec:
     side: str
     joints: tuple          # pan, shoulder, elbow, wrist_flex, wrist_roll, gripper
-    finger_body: str       # body carrying the fixed finger / palm (wrist roll link)
+    finger_body: str       # body carrying the fixed finger (wrist roll link)
     jaw_body: str          # moving jaw
-    grasp_offset: tuple    # grasp point in finger_body frame (default: jaw COM, CALIBRATE)
-    tool_axis: tuple = (1.0, 0.0, 0.0)  # approach axis in finger_body frame
+    grasp_offset: tuple    # grasp point in finger_body frame: where a ~1 cm object sits when clamped
+    tool_axis: tuple       # approach axis in finger_body frame (along the fingers, = wrist roll axis)
+    close_axis: tuple      # direction the jaw moves when closing, in finger_body frame (perpendicular to tool_axis)
 
 
+# Calibrated from the MJCF (meshes collide as convex hulls): a 1 cm rod placed 3 cm behind the fingertip rests
+# against the fixed finger's hull at grasp_offset, and the jaw reaches it at q ~ 1.5 (< gripper_close_q, so it
+# squeezes). The grasp point is ~6 mm from the wrist-roll axis, so rolling the wrist turns the closing direction
+# without moving the grasp point. Re-check with the probe's "gripper" section.
 LEFT_ARM = ArmSpec(
     "left",
     ("arm_left_pan_joint", "arm_left_shoulder_joint", "arm_left_elbow_joint",
      "arm_left_wrist_flex_joint", "arm_left_wrist_roll_joint", "arm_left_gripper_joint"),
-    "arm_left_wrist_roll_link", "arm_left_jaw_link", (0.0576, 0.0236, 0.0436),
+    "arm_left_wrist_roll_link", "arm_left_jaw_link",
+    (0.120, 0.0027, 0.0047), (1.0, 0.0, 0.0), (0.0, -0.5, -0.866),
 )
 RIGHT_ARM = ArmSpec(
     "right",
     ("arm_right_pan_joint", "arm_right_shoulder_joint", "arm_right_elbow_joint",
      "arm_right_wrist_flex_joint", "arm_right_wrist_roll_joint", "arm_right_gripper_joint"),
-    "arm_right_wrist_roll_link", "arm_right_jaw_link", (0.0576, -0.0259, 0.0423),
+    "arm_right_wrist_roll_link", "arm_right_jaw_link",
+    (0.120, -0.0027, 0.0047), (1.0, 0.0, 0.0), (0.0, 0.5, -0.866),
 )
 ARMS = {"left": LEFT_ARM, "right": RIGHT_ARM}
 
@@ -66,15 +76,17 @@ ARMS = {"left": LEFT_ARM, "right": RIGHT_ARM}
 class SceneConfig:
     scene_xml: str = SCENE_XML
     objects: tuple = ("plate", "glass", "bowl", "mug")   # all must exist in the scene XML as obj_<name>
-    # --- source: every utensil starts on the robot's shelf (site in the scene XML), in a shuffled row along y
+    # --- source: every utensil starts on the shelf riser (site in the scene XML), in a shuffled row along y
     shelf_site: str = "shelf"
     shelf_min_gap: float = 0.01        # min free space between neighbouring utensils
-    # --- destination table: re-posed every episode (centre x/y, top-surface height, yaw). Size comes from the XML.
-    table_x: tuple = (0.35, 0.65)
-    table_y: tuple = (-0.25, 0.25)
-    table_z: tuple = (0.55, 1.05)
+    # --- destination table, in front of the robot: x/y/yaw re-sampled every episode, size from the XML.
+    table_z: float = 0.85              # constant top-surface height (must match the table body in the XML)
+    table_gap: tuple = (0.0, 0.08)     # distance of the table's nearest edge beyond the front limit
+                                       # (front limit = front edge of the shelf + table_clearance)
+    table_y: tuple = (-0.15, 0.15)     # table centre y
     table_yaw: tuple = (-math.pi / 2, math.pi / 2)   # covers every distinct orientation of a rectangle
-    table_clearance: float = 0.03      # min gap between table and any robot geom
+    table_clearance: float = 0.03      # min gap between table and any robot geom / the shelf
+    goal_margin: float = 0.01          # min distance between the placed object's footprint and the table edge
     # --- reachability filtering (kinematic reach cloud; see pickplace_env._build_reach_cloud)
     reach_check: bool = True
     reach_samples: int = 50000
@@ -94,21 +106,22 @@ class TaskConfig:
     arm_max_lag: float = 0.15
     gripper_max_lag: float = 0.30
     lift_max_lag: float = 0.03
-    # CALIBRATE: which gripper angle is open/closed (probe prints a sweep)
-    gripper_open_q: float = 1.2
-    gripper_close_q: float = -0.1
-    arm_home: tuple = (0.0, 0.0, 0.0, 0.0, 0.0, 1.2)
+    # gripper angles from the probe's sweep (jaw<->finger distance 0.059 at -0.17, 0.035 at 1.75)
+    gripper_open_q: float = -0.1
+    gripper_close_q: float = 1.75
+    arm_home: tuple = (0.0, 0.0, 0.0, 0.0, 0.0, -0.1)
     home_noise: float = 0.05
     lift_home_range: tuple = (0.05, 0.30)
-    min_goal_dist: float = 0.10
-    # --- grasp geometry (shared by env reward/reachability and the expert)
-    side_height_frac: float = 0.6      # "side" grasp height as a fraction of object height
-    top_depth: float = 0.006           # "top" grasp: how far below the rim top the grasp point sits
-    # --- bimanual episodes
+    # --- grasp geometry (shared by env reward/reachability and the expert; points come from OBJECT_SPECS)
+    # tool axis pitch down from horizontal per grasp style (the heading follows the arm, except for a handle)
+    rim_pitch: float = 0.9
+    stem_pitch: float = 1.0
+    handle_pitch: float = 0.7
+    # --- bimanual: these objects are ALWAYS carried with both arms, every other object with one ("rim" style only)
     bimanual_objects: tuple = ("plate", "bowl")
-    bimanual_prob: float = 1.0         # prob. an object in bimanual_objects is carried with BOTH arms
-    bimanual_y_max: float = 0.10       # |y| limit of the object so both arms can reach its two sides
-    bimanual_style: str = "down"       # "down": both tools point down onto opposite rims; "inward": tools point at each other
+    bimanual_y_max: float = 0.10       # |y| limit of the object so both arms can reach it
+    bimanual_rim_angle: float = 0.8    # rad: where each hand grips the rim, measured from the robot-facing point
+                                       # (pi/2 = left/right sides; smaller = closer to the robot, more reach)
     # success
     place_tol_xy: float = 0.02
     place_tol_z: float = 0.015

@@ -10,42 +10,42 @@
   <!-- ==================== ASSETS ==================== -->
   <asset>
     <!-- Base & Wheels -->
-    <mesh name="base_link" content_type="model/stl" file="meshes/base_link.stl" />
-    <mesh name="wheel_left_link" content_type="model/stl" file="meshes/wheel_left_link.stl" />
-    <mesh name="wheel_right_link" content_type="model/stl" file="meshes/wheel_right_link.stl" />
+    <mesh name="base_link" content_type="model/stl" file="meshes/sysmic_v2/base_link.stl" />
+    <mesh name="wheel_left_link" content_type="model/stl" file="meshes/sysmic_v2/wheel_left_link.stl" />
+    <mesh name="wheel_right_link" content_type="model/stl" file="meshes/sysmic_v2/wheel_right_link.stl" />
 
     <!-- Lift Carriage -->
-    <mesh name="lift_carriage_link_body" content_type="model/stl" file="meshes/lift_carriage_link_body.stl" />
-    <mesh name="lift_carriage_link" content_type="model/stl" file="meshes/lift_carriage_link.stl" />
-    <mesh name="lift_carriage_link_sysmic_text" file="meshes/lift_carriage_link_sysmic_text.stl" inertia="shell" />
+    <mesh name="lift_carriage_link_body" content_type="model/stl" file="meshes/sysmic_v2/lift_carriage_link_body.stl" />
+    <mesh name="lift_carriage_link" content_type="model/stl" file="meshes/sysmic_v2/lift_carriage_link.stl" />
+    <mesh name="lift_carriage_link_sysmic_text" file="meshes/sysmic_v2/lift_carriage_link_sysmic_text.stl" inertia="shell" />
 
     <!-- Casters -->
-    <mesh name="caster_FL_swivel_link" content_type="model/stl" file="meshes/caster_FL_swivel_link.stl" />
-    <mesh name="caster_FR_swivel_link" content_type="model/stl" file="meshes/caster_FR_swivel_link.stl" />
-    <mesh name="caster_RL_swivel_link" content_type="model/stl" file="meshes/caster_RL_swivel_link.stl" />
-    <mesh name="caster_RR_swivel_link" content_type="model/stl" file="meshes/caster_RR_swivel_link.stl" />
-    <mesh name="caster_FL_wheel_link" content_type="model/stl" file="meshes/caster_FL_wheel_link.stl" />
-    <mesh name="caster_FR_wheel_link" content_type="model/stl" file="meshes/caster_FR_wheel_link.stl" />
-    <mesh name="caster_RL_wheel_link" content_type="model/stl" file="meshes/caster_RL_wheel_link.stl" />
-    <mesh name="caster_RR_wheel_link" content_type="model/stl" file="meshes/caster_RR_wheel_link.stl" />
+    <mesh name="caster_FL_swivel_link" content_type="model/stl" file="meshes/sysmic_v2/caster_FL_swivel_link.stl" />
+    <mesh name="caster_FR_swivel_link" content_type="model/stl" file="meshes/sysmic_v2/caster_FR_swivel_link.stl" />
+    <mesh name="caster_RL_swivel_link" content_type="model/stl" file="meshes/sysmic_v2/caster_RL_swivel_link.stl" />
+    <mesh name="caster_RR_swivel_link" content_type="model/stl" file="meshes/sysmic_v2/caster_RR_swivel_link.stl" />
+    <mesh name="caster_FL_wheel_link" content_type="model/stl" file="meshes/sysmic_v2/caster_FL_wheel_link.stl" />
+    <mesh name="caster_FR_wheel_link" content_type="model/stl" file="meshes/sysmic_v2/caster_FR_wheel_link.stl" />
+    <mesh name="caster_RL_wheel_link" content_type="model/stl" file="meshes/sysmic_v2/caster_RL_wheel_link.stl" />
+    <mesh name="caster_RR_wheel_link" content_type="model/stl" file="meshes/sysmic_v2/caster_RR_wheel_link.stl" />
 
     <!-- Left Arm (arm1) -->
-    <mesh name="arm1_link0" content_type="model/stl" file="meshes/arm1_link0.stl" />
-    <mesh name="arm1_link1" content_type="model/stl" file="meshes/arm1_link1.stl" />
-    <mesh name="arm1_link2" content_type="model/stl" file="meshes/arm1_link2.stl" />
-    <mesh name="arm1_link3" content_type="model/stl" file="meshes/arm1_link3.stl" />
-    <mesh name="arm1_link4" content_type="model/stl" file="meshes/arm1_link4.stl" />
-    <mesh name="arm1_link5" content_type="model/stl" file="meshes/arm1_link5.stl" />
-    <mesh name="arm1_link6" content_type="model/stl" file="meshes/arm1_link6.stl" />
+    <mesh name="arm1_link0" content_type="model/stl" file="meshes/sysmic_v2/arm1_link0.stl" />
+    <mesh name="arm1_link1" content_type="model/stl" file="meshes/sysmic_v2/arm1_link1.stl" />
+    <mesh name="arm1_link2" content_type="model/stl" file="meshes/sysmic_v2/arm1_link2.stl" />
+    <mesh name="arm1_link3" content_type="model/stl" file="meshes/sysmic_v2/arm1_link3.stl" />
+    <mesh name="arm1_link4" content_type="model/stl" file="meshes/sysmic_v2/arm1_link4.stl" />
+    <mesh name="arm1_link5" content_type="model/stl" file="meshes/sysmic_v2/arm1_link5.stl" />
+    <mesh name="arm1_link6" content_type="model/stl" file="meshes/sysmic_v2/arm1_link6.stl" />
 
     <!-- Right Arm (arm2) -->
-    <mesh name="arm2_link0" content_type="model/stl" file="meshes/arm2_link0.stl" />
-    <mesh name="arm2_link1" content_type="model/stl" file="meshes/arm2_link1.stl" />
-    <mesh name="arm2_link2" content_type="model/stl" file="meshes/arm2_link2.stl" />
-    <mesh name="arm2_link3" content_type="model/stl" file="meshes/arm2_link3.stl" />
-    <mesh name="arm2_link4" content_type="model/stl" file="meshes/arm2_link4.stl" />
-    <mesh name="arm2_link5" content_type="model/stl" file="meshes/arm2_link5.stl" />
-    <mesh name="arm2_link6" content_type="model/stl" file="meshes/arm2_link6.stl" />
+    <mesh name="arm2_link0" content_type="model/stl" file="meshes/sysmic_v2/arm2_link0.stl" />
+    <mesh name="arm2_link1" content_type="model/stl" file="meshes/sysmic_v2/arm2_link1.stl" />
+    <mesh name="arm2_link2" content_type="model/stl" file="meshes/sysmic_v2/arm2_link2.stl" />
+    <mesh name="arm2_link3" content_type="model/stl" file="meshes/sysmic_v2/arm2_link3.stl" />
+    <mesh name="arm2_link4" content_type="model/stl" file="meshes/sysmic_v2/arm2_link4.stl" />
+    <mesh name="arm2_link5" content_type="model/stl" file="meshes/sysmic_v2/arm2_link5.stl" />
+    <mesh name="arm2_link6" content_type="model/stl" file="meshes/sysmic_v2/arm2_link6.stl" />
   </asset>
 
   <!-- ==================== WORLDBODY ==================== -->

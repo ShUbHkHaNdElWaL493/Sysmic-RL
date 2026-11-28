@@ -1,5 +1,6 @@
 import warnings
 
+import mujoco
 import numpy as np
 import pytest
 
@@ -13,7 +14,7 @@ warnings.filterwarnings("ignore", message="No reachable table pose")
 @pytest.fixture(scope="module")
 def cfg():
     c = PickPlaceConfig()          # the real mjcf/sysmic_v2_scene.xml
-    c.scene.reach_samples = 5000   # keep env construction fast
+    c.scene.reach_samples = 20000  # sparser clouds make most resets fall back
     return c
 
 
@@ -50,6 +51,61 @@ def test_all_utensils_settle_on_shelf(env, seed):
     assert all(a[1] <= b[0] + 1e-3 for a, b in zip(spans, spans[1:]))   # no overlap along the shelf
 
 
+def _ray(env, obj, origin_local, dir_local):
+    """Distance along a ray (object frame) to the first COLLISION geom of that utensil, or None."""
+    m, d = env.model, env.data
+    b = env.obj_body[obj]
+    R, p = d.xmat[b].reshape(3, 3), d.xpos[b]
+    geomid = np.zeros(1, dtype=np.int32)
+    groups = np.array([0, 0, 0, 1, 0, 0], dtype=np.uint8)          # collision geoms are group 3
+    dist = mujoco.mj_ray(m, d, p + R @ np.array(origin_local), R @ np.array(dir_local, dtype=float), groups, 1, -1, geomid)
+    return None if geomid[0] < 0 or env.geom_obj[geomid[0]] != env.object_names.index(obj) else dist
+
+
+def test_utensil_shapes(env):
+    env.reset(seed=0)
+    down = (0, 0, -1)
+    # mug: hollow with an 8 mm solid base; the handle loop has a hole and a graspable outer bar
+    assert abs(_ray(env, "mug", (0, 0, 0.2), down) - (0.2 - 0.008)) < 1e-3
+    assert _ray(env, "mug", (0.0475, -0.05, 0.0475), (0, 1, 0)) is None          # through the handle hole
+    assert _ray(env, "mug", (0.060, -0.05, 0.0475), (0, 1, 0)) is not None       # outer bar
+    # wine glass: thin stem under a hollow bowl
+    assert _ray(env, "glass", (0.008, -0.05, 0.035), (0, 1, 0)) is None          # beside the stem
+    assert _ray(env, "glass", (0.0, -0.05, 0.035), (0, 1, 0)) is not None        # the stem
+    assert _ray(env, "glass", (0, 0, 0.3), down) > 0.3 - 0.075                    # bowl is hollow down to its bottom
+    # bowl / plate: hollow dishes (the centre is low, the rim high)
+    assert _ray(env, "bowl", (0, 0, 0.2), down) > 0.2 - 0.006
+    assert _ray(env, "plate", (0, 0, 0.2), down) > 0.2 - 0.008
+
+
+def test_grasp_plans_target_handle_stem_and_rims(env):
+    env.reset(seed=1, options={"object": "mug"})
+    (p, t, c), = env.grasp_plan().values()
+    o, yaw = env.object_pos(), env.object_yaw()
+    hd = np.array([np.cos(yaw), np.sin(yaw), 0])
+    assert np.allclose(p, o + 0.060 * hd + [0, 0, 0.0475])                       # outer bar of the handle
+    assert abs(t @ c) < 1e-9 and abs(c @ hd) < 1e-9                               # jaws close across the loop
+    assert env.heading(env.side, p) @ (-hd) > np.cos(0.3)                         # handle aimed at the grasping arm
+    env.reset(seed=1, options={"object": "glass"})
+    (p, t, c), = env.grasp_plan().values()
+    assert np.allclose(p, env.object_pos() + [0, 0, 0.035]) and abs(c[2]) < 1e-9  # stem; jaws close horizontally
+    env.reset(seed=1, options={"object": "bowl"})
+    o = env.object_pos()
+    for s, (p, t, c) in env.grasp_plan().items():
+        assert abs(t @ c) < 1e-9 and c @ np.r_[o[:2] - p[:2], 0] > 0              # jaw moves inwards: finger inside
+
+
+def test_gripper_calibration_matches_config(cfg):
+    from sysmic_rl.pickplace.config import ARMS
+    from sysmic_rl.pickplace.probe import calibrate_gripper
+    for s in ("left", "right"):
+        c = calibrate_gripper(cfg.scene.scene_xml, s)
+        assert np.allclose(c["grasp_offset"], ARMS[s].grasp_offset, atol=1e-3)
+        assert np.allclose(c["tool_axis"], ARMS[s].tool_axis, atol=1e-3)
+        assert np.allclose(c["close_axis"], ARMS[s].close_axis, atol=2e-3)
+        assert c["jaw_q"] < cfg.task.gripper_close_q          # the jaw reaches the object before its target: it squeezes
+
+
 def test_utensil_order_is_randomised(env):
     orders = set()
     for seed in range(8):
@@ -58,17 +114,23 @@ def test_utensil_order_is_randomised(env):
     assert len(orders) > 1
 
 
-def test_table_pose_in_ranges_and_clear_of_robot(env, cfg):
+def test_table_in_front_at_fixed_height(env, cfg):
     sc = cfg.scene
-    for seed in range(10):
+    corners = np.array([[1, 1], [1, -1], [-1, 1], [-1, -1]]) * env.table_half
+    checked = 0
+    for seed in range(12):
         _, info = env.reset(seed=seed)
-        if info["reach_fallback"]:
-            continue   # fallback keeps the last candidate, which may be anywhere
-        assert sc.table_z[0] <= env.place_z <= sc.table_z[1]
+        assert env.place_z == sc.table_z
         assert sc.table_yaw[0] <= env.table_yaw <= sc.table_yaw[1]
+        assert env.table_to_world(corners)[:, 0].min() >= env.front_x - 1e-9   # in front of the shelf
         assert not env._table_collides(clearance=0.0)
+        if info["reach_fallback"]:
+            continue
+        checked += 1
         assert abs(env.goal_pos[2] - env.place_z) < 1e-9
         assert np.all(np.abs(env.world_to_table(env.goal_pos[:2])) <= env.table_half)
+        assert env.reachable(env.grasp_plan(env.goal_pos), env.sides)
+    assert checked >= 6   # fallbacks (sparse test reach cloud) are covered by the probe, not here
 
 
 def test_table_options_and_frames(env):
@@ -79,6 +141,8 @@ def test_table_options_and_frames(env):
     # the table's top face really is where the env thinks it is
     top = env.data.geom_xpos[env.table_geom][2] + env.model.geom_size[env.table_geom][2]
     assert abs(top - 0.8) < 1e-9
+    env.reset(seed=0, options={"table_pos": (0.55, 0.0)})   # (x, y) only -> the configured fixed height
+    assert env.place_z == env.cfg.scene.table_z
 
 
 def test_table_collision_check_sees_the_base(env):
@@ -93,16 +157,34 @@ def test_table_collision_check_sees_the_base(env):
 
 def test_bimanual_for_plate_and_bowl_only(env):
     for name, both in [("plate", True), ("bowl", True), ("glass", False), ("mug", False)]:
-        _, info = env.reset(seed=2, options={"object": name})
-        assert (info["arm"] == "both") == both and (len(env.sides) == 2) == both
-    env.reset(seed=2, options={"object": "plate", "arm": "left"})
-    assert env.sides == ("left",)
+        for seed in range(3):
+            _, info = env.reset(seed=seed, options={"object": name})
+            assert (info["arm"] == "both") == both and (len(env.sides) == 2) == both
+    with pytest.raises(ValueError):
+        env.reset(seed=2, options={"object": "plate", "arm": "left"})
+    with pytest.raises(ValueError):
+        env.reset(seed=2, options={"object": "glass", "arm": "both"})
+    env.reset(seed=2, options={"object": "glass", "arm": "right"})
+    assert env.sides == ("right",)
+
+
+def test_gripper_close_q_is_closed(env):
+    d, m, tc = env.data, env.model, env.cfg.task
+    gap = {}
+    for q in (tc.gripper_open_q, tc.gripper_close_q):
+        d.qpos[env.q_idx[env.sl["left"].stop - 1]] = q
+        mujoco.mj_kinematics(m, d)
+        gap[q] = np.linalg.norm(d.xipos[env.jaw_bid["left"]] - d.xipos[env.finger_bid["left"]])
+    assert gap[tc.gripper_close_q] < gap[tc.gripper_open_q]
+    env.reset(seed=0)
 
 
 def test_bimanual_plan_has_opposite_sides(env):
     env.reset(seed=3, options={"object": "plate"})
     plan, o = env.grasp_plan(), env.object_pos()
     assert plan["left"][0][1] > o[1] > plan["right"][0][1]
+    assert plan["left"][0][0] < o[0] and plan["right"][0][0] < o[0]      # rim points on the robot-facing half
+    assert all(plan[s][1][2] < 0 and plan[s][1][0] > 0 for s in env.sides)   # tool tilted down + forward
     assert set(env.action_mask[1:13]) == {1.0}
 
 
