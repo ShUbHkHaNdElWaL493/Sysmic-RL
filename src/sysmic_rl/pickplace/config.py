@@ -1,17 +1,40 @@
 """Configuration for the Sysmic pick-and-place task.
 
 Every number here that depends on the *real* robot geometry (grasp offsets,
-gripper open/close angles, table pose, spawn region) is a first guess derived
-from the MJCF. Calibrate them with `python -m sysmic_rl.pickplace.probe`.
+gripper open/close angles, table pose) is a first guess derived from the MJCF.
+Calibrate them with `python -m sysmic_rl.pickplace.probe`.
+The scene itself (robot + shelf + table + utensils) is the static `mjcf/sysmic_v2_scene.xml`.
 """
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
 WS_ROOT = Path(__file__).resolve().parents[3]
-ROBOT_XML = os.environ.get("ROBOT_XML", str(WS_ROOT / "mjcf" / "sysmic_v2.xml"))
+SCENE_XML = os.environ.get("SYSMIC_SCENE_XML", str(WS_ROOT / "mjcf" / "sysmic_v2_scene.xml"))
+
+
+@dataclass(frozen=True)
+class ObjectSpec:
+    """Metadata for a utensil defined in the scene XML (body `obj_<name>`, origin = centre of the base bottom)."""
+    name: str
+    height: float
+    radius: float        # outer footprint radius
+    mass: float
+    grasp_style: str     # "top" (pinch the rim from above) | "side" (wrap the body)
+    rim_radius: float    # axis -> rim distance used by the expert for "top"
+    footprint_y: float   # half-width along the shelf (y) when spawned (mug: handle turned along x)
+
+
+# Must match the geometry in mjcf/sysmic_v2_scene.xml.
+OBJECT_SPECS = {
+    "plate": ObjectSpec("plate", 0.0236, 0.065, 0.25, "top", 0.062, 0.065),
+    "bowl": ObjectSpec("bowl", 0.0443, 0.0675, 0.30, "top", 0.066, 0.0675),
+    "glass": ObjectSpec("glass", 0.09, 0.03, 0.20, "side", 0.0, 0.03),
+    "mug": ObjectSpec("mug", 0.08, 0.047, 0.25, "side", 0.0, 0.035),
+}
 
 
 @dataclass(frozen=True)
@@ -41,40 +64,22 @@ ARMS = {"left": LEFT_ARM, "right": RIGHT_ARM}
 
 @dataclass
 class SceneConfig:
-    robot_xml: str = ROBOT_XML
-    objects: tuple = ("plate", "glass", "bowl", "mug")
-    object_scale: float = 1.0
-    friction: tuple = (1.0, 0.005, 0.0001)
-    # --- destination table: spawned every episode (centre x/y ranges, top-surface height range)
-    table_half_xy: tuple = (0.18, 0.22)
-    table_thickness: float = 0.04
-    table_x: tuple = (0.25, 0.55)
+    scene_xml: str = SCENE_XML
+    objects: tuple = ("plate", "glass", "bowl", "mug")   # all must exist in the scene XML as obj_<name>
+    # --- source: every utensil starts on the robot's shelf (site in the scene XML), in a shuffled row along y
+    shelf_site: str = "shelf"
+    shelf_min_gap: float = 0.01        # min free space between neighbouring utensils
+    # --- destination table: re-posed every episode (centre x/y, top-surface height, yaw). Size comes from the XML.
+    table_x: tuple = (0.35, 0.65)
     table_y: tuple = (-0.25, 0.25)
     table_z: tuple = (0.55, 1.05)
+    table_yaw: tuple = (-math.pi / 2, math.pi / 2)   # covers every distinct orientation of a rectangle
     table_clearance: float = 0.03      # min gap between table and any robot geom
     # --- reachability filtering (kinematic reach cloud; see pickplace_env._build_reach_cloud)
     reach_check: bool = True
     reach_samples: int = 50000
     reach_tol: float = 0.04            # grasp point must be within this of a reachable sample
     reach_axis_tol: float = 0.5        # rad: sample's tool axis must be this close to the needed one
-
-
-@dataclass
-class SourceConfig:
-    """Where objects START: a flat surface that belongs to the robot (the 'extrusion').
-
-    manual=None -> auto-detected by casting rays downwards onto the robot's collision geoms.
-    manual=(cx, cy, z, hx, hy) -> world-frame rectangle at the home pose (use if detection picks the wrong patch).
-    body -> body the surface is attached to (moves with it). None = auto (detected) / world (manual).
-    """
-    manual: tuple | None = None
-    body: str | None = None
-    search_x: tuple = (-0.10, 0.60)
-    search_y: tuple = (-0.45, 0.45)
-    search_z: tuple = (0.30, 1.40)
-    step: float = 0.01
-    min_area: float = 0.01             # m^2: smallest patch accepted as "the surface"
-    edge_margin: float = 0.015         # keep objects this far from the patch edge
 
 
 @dataclass
@@ -142,7 +147,6 @@ class PickPlaceConfig:
     scene: SceneConfig = field(default_factory=SceneConfig)
     task: TaskConfig = field(default_factory=TaskConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)
-    source: SourceConfig = field(default_factory=SourceConfig)
 
     def to_dict(self):
         return asdict(self)

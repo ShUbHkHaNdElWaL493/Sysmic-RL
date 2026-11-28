@@ -34,11 +34,11 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--model"); p.add_argument("--expert", action="store_true")
     p.add_argument("--episodes", type=int, default=100); p.add_argument("--render", action="store_true")
-    p.add_argument("--robot-xml", default=None)
+    p.add_argument("--scene-xml", default=None)
     a = p.parse_args()
     cfg = PickPlaceConfig()
-    if a.robot_xml:
-        cfg.scene.robot_xml = a.robot_xml
+    if a.scene_xml:
+        cfg.scene.scene_xml = a.scene_xml
     if a.expert:
         from sysmic_rl.imitation.expert import ScriptedExpert
         ex = ScriptedExpert()

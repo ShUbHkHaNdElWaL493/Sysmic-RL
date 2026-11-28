@@ -1,10 +1,10 @@
 """Calibration probe: run this BEFORE training and fix SceneConfig/TaskConfig from its output.
 
-  uv run python -m sysmic_rl.pickplace.probe [--robot-xml mjcf/sysmic_v2.xml] [--samples 20000]
+  uv run python -m sysmic_rl.pickplace.probe [--scene-xml mjcf/sysmic_v2_scene.xml] [--samples 20000]
 
-Reports (0) the detected source surface (the robot's own extrusion) and how much of it / of the table range is
-reachable per object and arm mode, (1) reachable grasp-point envelope per arm at lift=0 and lift=max, suggested
-table height / spawn x-range, (2) which gripper angle is open vs closed, (3) mesh-overlap contacts at the home pose.
+Reports (0) the shelf the utensils start on and how much of it / of the table range is reachable per object and
+arm mode, (1) reachable grasp-point envelope per arm at lift=0 and lift=max, suggested table height / x-range,
+(2) which gripper angle is open vs closed, (3) mesh-overlap contacts at the home pose.
 """
 from __future__ import annotations
 
@@ -22,49 +22,51 @@ def pct(a, q): return np.percentile(a, q, axis=0).round(3)
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--robot-xml", default=None)
+    ap.add_argument("--scene-xml", default=None)
     ap.add_argument("--samples", type=int, default=20000)
     a = ap.parse_args()
     cfg = PickPlaceConfig()
-    if a.robot_xml:
-        cfg.scene.robot_xml = a.robot_xml
+    if a.scene_xml:
+        cfg.scene.scene_xml = a.scene_xml
     env = SysmicPickPlaceEnv(cfg)
     env.reset(seed=0)
     m, d, rng = env.model, env.data, np.random.default_rng(0)
 
-    print("== source surface (objects start here) ==")
-    lo, hi, z = env.surface.bbox(d)
-    print(f"  body={env.surface.body_name}  top z={z:.3f}  x[{lo[0]:.3f},{hi[0]:.3f}] y[{lo[1]:.3f},{hi[1]:.3f}]  "
-          f"usable area={env.surface.area:.3f} m^2  moves_with_lift={env.surface_moves}")
-    print("  (wrong patch? set SourceConfig.manual=(cx, cy, z, hx, hy) or SourceConfig.body=...)")
+    print("== shelf (all utensils start here; site in the scene XML) ==")
+    cx, cy, z, hx, hy = env.shelf
+    print(f"  top z={z:.3f}  x[{cx - hx:.3f},{cx + hx:.3f}] y[{cy - hy:.3f},{cy + hy:.3f}]")
+    for q in (env.lo[0], env.hi[0]):
+        d.qpos[env.q_idx[0]] = q
+        mujoco.mj_kinematics(m, d)
+        print(f"  lift={q:.3f}: shelf is {d.xpos[m.body('arm_left_base_link').id][2] - z:.3f} m below the arm bases")
+    print("  (wrong place? edit the `shelf` site and `shelf_top` geom in the scene XML)")
 
-    print("\n== reachability of object spawn spots and table poses (fraction feasible) ==")
+    print("\n== reachability of shelf spawns and table poses (fraction feasible) ==")
     n = 200
     for name in env.object_names:
         row = []
-        for label, sides in (("one-arm", None), ("both-arms", ("left", "right"))):
-            ok = tot = 0
+        for label, both in (("one-arm", False), ("both-arms", True)):
+            ok = 0
             for _ in range(n):
                 env._set_active(name, ("left",))
-                p = env.surface.sample(rng, env.spec.radius, d)
-                sd = sides or (("left",) if p[1] >= 0 else ("right",))
+                p = env._shelf_row(rng, name, both)[name][0]
+                sd = ("left", "right") if both else (("left",) if p[1] >= 0 else ("right",))
                 env._set_active(name, sd)
-                tot += 1
-                ok += env.reachable(env.grasp_plan(p, sd), sd, source=True)
-            row.append(f"{label} {ok / tot:.0%}")
-        gok = 0
+                ok += env.reachable(env.grasp_plan(p, sd), sd)
+            row.append(f"{label} {ok / n:.0%}")
+        clear = gok = 0
         for _ in range(n):
             c = np.array([rng.uniform(*cfg.scene.table_x), rng.uniform(*cfg.scene.table_y)])
-            top = rng.uniform(*cfg.scene.table_z)
-            env._place_table(c, top)
+            env._place_table(c, rng.uniform(*cfg.scene.table_z), rng.uniform(*cfg.scene.table_yaw))
             if env._table_collides():
                 continue
+            clear += 1
             env._set_active(name, ("left", "right") if name in cfg.task.bimanual_objects else ("left",))
-            g = np.array([c[0], c[1], top])
+            g = np.array([*env.table_center, env.place_z])
             gok += env.reachable(env.grasp_plan(g), env.sides)
-        row.append(f"table pose+goal ok {gok / n:.0%}")
+        row.append(f"table clear of robot {clear / n:.0%}, + goal reachable {gok / n:.0%}")
         print(f"  {name:6s} [{env.spec.grasp_style}] " + " | ".join(row))
-    print("  Low numbers => widen table_* ranges, change the object's grasp_style, or fix gripper/grasp_offset.")
+    print("  Low numbers => change table_* ranges, the object's grasp_style, or fix gripper/grasp_offset.")
 
     print("\n== home-pose baseline contacts (auto-ignored by the reward) ==")
     for p in env._baseline_pairs:

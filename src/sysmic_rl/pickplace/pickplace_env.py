@@ -1,8 +1,10 @@
 """Pick-and-place Gymnasium environment for the Sysmic bimanual robot.
 
-* Objects START on a flat surface of the robot itself (auto-detected "extrusion", see surface.py).
-* They must be PLACED on a destination table that is spawned in the arms' reach every episode.
+* The scene is the static `mjcf/sysmic_v2_scene.xml` (robot included unmodified + shelf proxy + table + utensils).
+* All utensils START in a row on the robot's shelf; one of them (the active one) must be moved.
+* It must be PLACED on the destination table, which is re-posed (x, y, height, yaw) in the arms' reach every episode.
 * Per episode either ONE arm or BOTH arms are active (plates/bowls are carried with both by default).
+* Every pose is randomised in place (data.qpos / model.body_pos / model.body_quat); the model is compiled once.
 
 Action layout (13, same as SysmicV2Env): [lift, left(5 joints + gripper), right(5 + gripper)].
 """
@@ -14,13 +16,14 @@ import gymnasium as gym
 import mujoco
 import numpy as np
 
-from .config import ARMS, PickPlaceConfig
-from .objects import make_object_specs
-from .scene_builder import build_scene_xml
-from .surface import detect_support_surface
+from .config import ARMS, OBJECT_SPECS, PickPlaceConfig
 
 SIDES = ("left", "right")
 DOWN = np.array([0.0, 0.0, -1.0])
+
+
+def _yaw_quat(yaw):
+    return np.array([np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2)])
 
 
 class SysmicPickPlaceEnv(gym.Env):
@@ -35,12 +38,12 @@ class SysmicPickPlaceEnv(gym.Env):
         self._renderer = None
         self._viewer = None
 
-        self.model = mujoco.MjModel.from_xml_path(str(build_scene_xml(sc)))
+        self.model = mujoco.MjModel.from_xml_path(str(sc.scene_xml))
         self.model.opt.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
         self.model.opt.impratio = 10.0
         self.data = mujoco.MjData(self.model)
         self.arms = ARMS
-        self.specs = make_object_specs(sc.object_scale)
+        self.specs = OBJECT_SPECS
         self.object_names = tuple(sc.objects)
         self._init_indices()
 
@@ -50,6 +53,7 @@ class SysmicPickPlaceEnv(gym.Env):
         self.side = "left"
         self.obj_name = self.object_names[0]
         self.table_center = np.array([sum(sc.table_x) / 2, sum(sc.table_y) / 2])
+        self.table_yaw = 0.0
         self.place_z = sum(sc.table_z) / 2
         self.src_z = self.place_z
         self.fail_z = 0.1
@@ -114,7 +118,8 @@ class SysmicPickPlaceEnv(gym.Env):
 
         self.table_bid = m.body("table").id
         self.table_geom = m.geom("table_top").id
-        self.ped_geom = m.geom("table_pedestal").id
+        self.table_half = m.geom_size[self.table_geom][:2].copy()
+        table_geoms = gb == self.table_bid
 
         self.geom_obj = np.full(m.ngeom, -1, dtype=np.int16)
         self.obj_body, self.obj_qadr, self.obj_dadr = {}, {}, {}
@@ -123,6 +128,9 @@ class SysmicPickPlaceEnv(gym.Env):
             j = m.joint(f"obj_{n}_joint")
             self.obj_body[n], self.obj_qadr[n], self.obj_dadr[n] = b, int(j.qposadr[0]), int(j.dofadr[0])
             self.geom_obj[gb == b] = i
+        # robot geoms the table must keep clear of: every collidable geom that is not world/table/utensil
+        self.robot_geoms = np.where((gb != 0) & ~table_geoms & (self.geom_obj < 0)
+                                    & ((m.geom_contype != 0) | (m.geom_conaffinity != 0)))[0]
         self._fric0 = m.geom_friction.copy()
         self._mass0 = m.body_mass.copy()
         self._inertia0 = m.body_inertia.copy()
@@ -132,23 +140,14 @@ class SysmicPickPlaceEnv(gym.Env):
             self._goal_mocap = -1
 
     def _init_source(self):
-        hide = (self.geom_arm > 0) | (self.geom_obj >= 0)
-        hide[self.table_geom] = hide[self.ped_geom] = True
-        self.surface = detect_support_surface(self.model, self.data, hide, self.cfg.source)
-        gb = self.model.geom_bodyid
-        self.geom_surface = (gb == self.surface.body_id) & (self.geom_arm == 0) & (self.geom_obj < 0)
-        self.geom_surface[self.table_geom] = False
-        # Does the surface ride on the lift? (e.g. part of the lift carriage). If so reach is judged in the carriage frame.
-        d, m = self.data, self.model
-        saved = d.qpos[self.q_idx[0]]
-        zs = []
-        for q in (self.lo[0], self.hi[0]):
-            d.qpos[self.q_idx[0]] = q
-            mujoco.mj_kinematics(m, d)
-            zs.append(d.xpos[self.surface.body_id][2])
-        d.qpos[self.q_idx[0]] = saved
-        mujoco.mj_forward(m, d)
-        self.surface_moves = abs(zs[1] - zs[0]) > 1e-3
+        """The shelf (site in the scene XML) on the static base: world-frame rectangle (cx, cy, top_z, hx, hy)."""
+        m = self.model
+        sid = m.site(self.cfg.scene.shelf_site).id
+        (cx, cy, z), (hx, hy, _) = self.data.site_xpos[sid], m.site_size[sid]   # site centre = shelf surface
+        self.shelf = (float(cx), float(cy), float(z), float(hx), float(hy))
+        # fingertips may touch the shelf / base (needed to pinch a plate lying flat) without penalty
+        gb = m.geom_bodyid
+        self.geom_surface = (gb == m.body("base_link").id) | (np.arange(m.ngeom) == m.geom("shelf_top").id)
 
     def _set_active(self, obj_name, sides):
         self.obj_name, self.sides, self.side = obj_name, tuple(sides), sides[0]
@@ -246,55 +245,41 @@ class SysmicPickPlaceEnv(gym.Env):
         mujoco.mj_forward(m, d)
         return cloud
 
-    def _carriage_shift(self, lifts, source):
-        """z-shift turning 'sample at lift L' into 'same joints at the current lift' (only for carriage-mounted sources)."""
-        if source and self.surface_moves:
-            return np.stack([np.zeros_like(lifts), np.zeros_like(lifts), lifts - self.joint_pos()[0]], axis=1)
-        return 0.0
-
-    def reachable(self, plan, sides=None, source=False):
-        """Can the active arm(s) reach this grasp plan?  source=True: the object sits on the (possibly lift-mounted) source surface."""
+    def reachable(self, plan, sides=None):
+        """Can the active arm(s) reach this grasp plan?"""
         if self._cloud is None:
             return True
         sc = self.cfg.scene
         for s in (sides or self.sides):
             pt, axis = plan[s]
-            pts, axes, lifts, _ = self._cloud[s]
-            pts = pts - self._carriage_shift(lifts, source)
+            pts, axes, _, _ = self._cloud[s]
             sel = axes @ axis > np.cos(sc.reach_axis_tol)
             if not sel.any() or np.min(np.linalg.norm(pts[sel] - pt, axis=1)) > sc.reach_tol:
                 return False
         return True
 
-    def seed_config(self, goals, source=True):
+    def seed_config(self, goals):
         """Global-IK seed: best sampled joint configuration for {side: (point, axis)}.
 
-        Returns (lift, {side: q5}, err) or None. Carriage-mounted source (surface_moves): the lift is kept at its
-        current value and samples are compared in the carriage frame. Otherwise the second arm's sample is chosen
+        Returns (lift, {side: q5}, err) or None. With two arms the second arm's sample is chosen
         with a similar lift (the lift joint is shared).
         """
         if self._cloud is None:
             return None
         ang = lambda axes, ax: np.arccos(np.clip(axes @ ax, -1, 1))
         sides = list(goals)
-        carriage = source and self.surface_moves
-        now = float(self.joint_pos()[0])
 
         def err(side):
-            pts, axes, lifts, qs = self._cloud[side]
-            pts = pts - self._carriage_shift(lifts, source)
+            pts, axes, _, _ = self._cloud[side]
             return np.linalg.norm(pts - goals[side][0], axis=1) + 0.10 * ang(axes, goals[side][1])
 
         e1 = err(sides[0])
         qs1, lifts1 = self._cloud[sides[0]][3], self._cloud[sides[0]][2]
         if len(sides) == 1:
             i = int(np.argmin(e1))
-            return (now if carriage else float(lifts1[i])), {sides[0]: qs1[i]}, float(e1[i])
+            return float(lifts1[i]), {sides[0]: qs1[i]}, float(e1[i])
         e2 = err(sides[1])
         lifts2, qs2 = self._cloud[sides[1]][2], self._cloud[sides[1]][3]
-        if carriage:
-            i, j = int(np.argmin(e1)), int(np.argmin(e2))
-            return now, {sides[0]: qs1[i], sides[1]: qs2[j]}, float(e1[i] + e2[j])
         best = None
         for i in np.argsort(e1)[:100]:
             tot = e2 + 5.0 * np.abs(lifts2 - lifts1[i])
@@ -332,8 +317,8 @@ class SysmicPickPlaceEnv(gym.Env):
         g, dist = d.contact.geom[:n], d.contact.dist[:n]
         for i in np.where((self.geom_arm[g[:, 0]] > 0) | (self.geom_arm[g[:, 1]] > 0))[0]:
             g1, g2 = int(g[i, 0]), int(g[i, 1])
-            if self.geom_obj[g1] >= 0 or self.geom_obj[g2] >= 0:
-                continue
+            if self.geom_obj[g1] == self.active_idx or self.geom_obj[g2] == self.active_idx:
+                continue   # touching the ACTIVE utensil is wanted; the other utensils are obstacles
             # fingertips may touch the table / the source surface (needed to pinch a plate lying flat)
             for a, b in ((g1, g2), (g2, g1)):
                 if self.geom_tip[a] and (b == self.table_geom or self.geom_surface[b]):
@@ -369,6 +354,7 @@ class SysmicPickPlaceEnv(gym.Env):
         plan = self.grasp_plan()
         plan_rel = np.concatenate([plan[s][0] - gp[s] if s in plan else np.zeros(3) for s in SIDES])
         flags = np.array([f for s in SIDES for f in self._grasp_flags(s)], dtype=np.float64)
+        others = np.concatenate([d.xpos[self.obj_body[n]] for n in self.object_names if n != self.obj_name] or [[]])
         return [
             ("q_norm", qn), ("qvel", qv),
             ("grasp_pos", np.r_[gp["left"], gp["right"]]),
@@ -382,36 +368,70 @@ class SysmicPickPlaceEnv(gym.Env):
             ("goal_pos", self.goal_pos), ("goal_rel_obj", self.goal_pos - d.xpos[b]),
             ("active_arm", np.array([s in self.sides for s in SIDES], dtype=np.float64)),
             ("contacts", flags),   # [left finger, left jaw, right finger, right jaw]
+            ("others_pos", others),  # positions of the inactive utensils (obstacles), object_names order
         ]
 
     def _get_obs(self):
         return np.concatenate([v for _, v in self._obs_parts()]).astype(np.float32)
 
     # ------------------------------------------------------------------ table
-    def _place_table(self, centre, top):
-        sc = self.cfg.scene
+    def _place_table(self, centre, top, yaw=0.0):
+        """Re-pose the static table body (top-surface centre + yaw). Legs are fixed-length visuals, nothing is resized."""
         m = self.model
         m.body_pos[self.table_bid] = [centre[0], centre[1], top]
-        h = (top - sc.table_thickness) / 2
-        m.geom_size[self.ped_geom, 2] = max(h, 0.01)
-        m.geom_pos[self.ped_geom, 2] = -sc.table_thickness - h
-        self.table_center, self.place_z = np.array(centre, dtype=np.float64), float(top)
+        m.body_quat[self.table_bid] = _yaw_quat(yaw)
+        mujoco.mj_kinematics(m, self.data)
+        self.table_center, self.place_z, self.table_yaw = np.array(centre, dtype=np.float64), float(top), float(yaw)
+
+    def table_to_world(self, uv):
+        """Table-frame xy offset(s) -> world xy."""
+        c, s = np.cos(self.table_yaw), np.sin(self.table_yaw)
+        return self.table_center + np.asarray(uv) @ np.array([[c, s], [-s, c]])
+
+    def world_to_table(self, xy):
+        c, s = np.cos(self.table_yaw), np.sin(self.table_yaw)
+        return (np.asarray(xy) - self.table_center) @ np.array([[c, -s], [s, c]])
 
     def _table_collides(self, clearance=None):
-        """True if the table (inflated by `clearance`, default SceneConfig.table_clearance) touches any robot geom."""
+        """True if the table top comes within `clearance` (default SceneConfig.table_clearance) of any robot geom.
+
+        Uses mj_geomDistance rather than contacts: the table and base_link are both world-welded, and MuJoCo never
+        generates contacts between two world-welded bodies. Note base_link is a mesh, i.e. measured as its convex hull.
+        """
         m, d = self.model, self.data
-        m.geom_margin[self.table_geom] = self.cfg.scene.table_clearance if clearance is None else clearance
-        mujoco.mj_forward(m, d)
-        hit = False
-        for i in range(d.ncon):
-            g1, g2 = int(d.contact.geom[i, 0]), int(d.contact.geom[i, 1])
-            if self.table_geom in (g1, g2):
-                other = g2 if g1 == self.table_geom else g1
-                if self.geom_obj[other] < 0 and other != self.ped_geom:
-                    hit = True
-                    break
-        m.geom_margin[self.table_geom] = 0.0
-        return hit
+        clr = self.cfg.scene.table_clearance if clearance is None else clearance
+        mujoco.mj_kinematics(m, d)
+        for g in self.robot_geoms:
+            if mujoco.mj_geomDistance(m, d, self.table_geom, int(g), clr + 1e-3, None) < clr:
+                return True
+        return False
+
+    def _shelf_row(self, rng, active, bimanual):
+        """{name: (world pos of base centre, yaw)} for every utensil: a row along the shelf (y) in shuffled order
+        with random spacing. Bimanual episodes put the active utensil in a middle slot (both arms need small |y|)."""
+        sc = self.cfg.scene
+        cx, cy, z, hx, hy = self.shelf
+        order = [self.object_names[i] for i in rng.permutation(len(self.object_names))]
+        if bimanual and len(order) > 2:
+            order.remove(active)
+            order.insert(int(rng.integers(1, len(order))), active)
+        half_w = np.array([self.specs[n].footprint_y for n in order])
+        slack = 2 * hy - 2 * half_w.sum() - sc.shelf_min_gap * (len(order) + 1)
+        if slack < 0:
+            raise ValueError(f"Utensils {order} do not fit on the shelf ({2 * hy:.3f} m wide).")
+        gaps = sc.shelf_min_gap + slack * rng.dirichlet(np.ones(len(order) + 1))
+        poses, y = {}, cy - hy
+        for n, w, g in zip(order, half_w, gaps):
+            y += g + w
+            spec = self.specs[n]
+            jx = max(0.0, hx - spec.radius)          # plate / bowl fill the shelf depth: no x jitter
+            if spec.footprint_y < spec.radius:       # has a handle (mug): keep it pointing along x (front/back)
+                yaw = rng.choice([-1.0, 1.0]) * np.pi / 2 + rng.uniform(-0.3, 0.3)
+            else:
+                yaw = rng.uniform(-np.pi, np.pi)
+            poses[n] = (np.array([cx + rng.uniform(-jx, jx), y, z]), float(yaw))
+            y += w
+        return poses
 
     # ------------------------------------------------------------------ reset
     def reset(self, seed=None, options=None):
@@ -432,45 +452,40 @@ class SysmicPickPlaceEnv(gym.Env):
             return self._get_obs(), {}
         spec = self.spec
 
-        # 1) object start pose on the robot's own surface (reachable by the arm(s) that will be used)
-        fixed_xy = opt.get("object_pos")
-        pos, sides = None, None
-        for attempt in range(300):
-            p = (np.array([fixed_xy[0], fixed_xy[1], self.surface.bbox(d)[2]]) if fixed_xy is not None
-                 else self.surface.sample(rng, spec.radius, d))
-            if bimanual and fixed_xy is None and abs(p[1]) > tc.bimanual_y_max:
-                continue
+        # 1) all utensils in a shuffled row on the shelf; the active one must be reachable by the arm(s) used
+        for attempt in range(100):
+            poses = self._shelf_row(rng, name, bimanual)
+            pos = poses[name][0]
             if bimanual:
-                cand = ("left", "right")
+                sides = ("left", "right")
             elif forced in SIDES:
-                cand = (forced,)
+                sides = (forced,)
             elif tc.arm_mode == "auto":
-                cand = ("left",) if p[1] >= 0 else ("right",)
+                sides = ("left",) if pos[1] >= 0 else ("right",)
             else:
-                cand = (tc.arm_mode,)
-            pos, sides = p, cand
-            if fixed_xy is not None or self.reachable(self.grasp_plan(p, cand), cand, source=True):
+                sides = (tc.arm_mode,)
+            if ((not bimanual or abs(pos[1]) <= tc.bimanual_y_max)
+                    and self.reachable(self.grasp_plan(pos, sides), sides)):
                 break
         else:
             self.reach_fallback = True
-        if pos is None:   # every candidate was rejected by the bimanual y-limit: take any spot
-            pos = self.surface.sample(rng, spec.radius, d)
-            sides = ("left", "right") if bimanual else ("left" if pos[1] >= 0 else "right",)
-            sides = tuple(sides)
         self._set_active(name, sides)
 
-        # 2) destination table + goal, in reach of the same arm(s), not touching the robot
+        # 2) destination table (x, y, height, yaw) + goal, in reach of the same arm(s), not touching the robot
         goal_ok = False
         for attempt in range(300):
             c = np.array([rng.uniform(*sc.table_x), rng.uniform(*sc.table_y)])
             top = float(rng.uniform(*sc.table_z))
+            yaw = float(rng.uniform(*sc.table_yaw))
             if "table_pos" in opt:
                 c, top = np.array(opt["table_pos"][:2], dtype=float), float(opt["table_pos"][2])
-            self._place_table(c, top)
+                yaw = float(opt.get("table_yaw", 0.0))
+            self._place_table(c, top, yaw)
             if "table_pos" not in opt and self._table_collides():
                 continue
-            half = np.maximum(np.array(sc.table_half_xy) - spec.radius - 0.03, 0.0)
-            gxy = np.array(opt["goal_pos"][:2]) if "goal_pos" in opt else c + rng.uniform(-1, 1, 2) * half
+            half = np.maximum(self.table_half - spec.radius - 0.03, 0.0)
+            gxy = (np.array(opt["goal_pos"][:2]) if "goal_pos" in opt
+                   else self.table_to_world(rng.uniform(-1, 1, 2) * half))
             if np.linalg.norm(gxy - pos[:2]) < tc.min_goal_dist and abs(top - pos[2]) < 0.02:
                 continue
             goal = np.array([gxy[0], gxy[1], top])
@@ -486,7 +501,7 @@ class SysmicPickPlaceEnv(gym.Env):
         self.src_z = float(pos[2])
         self.fail_z = min(self.place_z, self.src_z) - 0.25
 
-        # 3) physics randomisation + place the object
+        # 3) physics randomisation + place the utensils
         m.geom_friction[:] = self._fric0
         m.body_mass[:] = self._mass0
         m.body_inertia[:] = self._inertia0
@@ -497,10 +512,9 @@ class SysmicPickPlaceEnv(gym.Env):
             s = rng.uniform(*tc.mass_scale)
             m.body_mass[b] = self._mass0[b] * s
             m.body_inertia[b] = self._inertia0[b] * s
-        yaw = float(opt.get("object_yaw", rng.uniform(-0.3, 0.3) if spec.grasp_style == "side"
-                            else rng.uniform(-np.pi, np.pi)))
-        qa = self.obj_qadr[name]
-        d.qpos[qa:qa + 7] = [pos[0], pos[1], pos[2] + 0.002, np.cos(yaw / 2), 0, 0, np.sin(yaw / 2)]
+        for n, (p, oyaw) in poses.items():
+            qa = self.obj_qadr[n]
+            d.qpos[qa:qa + 7] = [p[0], p[1], p[2] + 0.002, *_yaw_quat(oyaw)]
 
         mujoco.mj_forward(m, d)
         for _ in range(30):

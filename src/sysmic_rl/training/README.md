@@ -62,7 +62,7 @@ uv run python -m sysmic_rl.training.train_sac \
 | `--steps` | 1,000,000 | environment steps of online training |
 | `--warmup` | 20,000 | critic-only gradient steps before the actor may change (0 = skip) |
 | `--device` | auto | `cpu`/`cuda` |
-| `--robot-xml` | – | robot path override |
+| `--scene-xml` | – | scene path override |
 
 ### Order of operations (and why)
 1. **Build** the agent and two envs (train + eval, different seeds).
@@ -130,4 +130,4 @@ uv run python -m sysmic_rl.training.evaluate --model runs/sac/best_model.zip --e
 | Multi-env speed-up | replace `DummyVecEnv` with `SubprocVecEnv`, and rewrite `prefill_buffer` to add rows of shape `(n_envs, …)` |
 
 Reminder: after any edit to the env (obs, reward, actions) **demos and checkpoints are stale** — see the compatibility rules in
-[ARCHITECTURE.md §7](ARCHITECTURE.md#7-i-want-to-change-x--where-do-i-go).
+[README §7](../../../README.md#7-i-want-to-change-x--where-do-i-go).

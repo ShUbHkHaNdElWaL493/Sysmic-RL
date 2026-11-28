@@ -7,13 +7,12 @@ so you can run and test it on its own.
 ```
 pickplace/
 ├── __init__.py         registers the Gym id "SysmicPickPlace-v0" and re-exports the main classes
-├── config.py           all tunable numbers, as dataclasses
-├── objects.py          procedural geometry for plate, bowl, glass, mug
-├── scene_builder.py    writes a scene XML: includes your robot + a spawnable table + parked objects
-├── surface.py          finds the robot's own flat "extrusion" (where objects start) by ray casting
+├── config.py           all tunable numbers, as dataclasses (+ OBJECT_SPECS: utensil dimensions)
 ├── pickplace_env.py    SysmicPickPlaceEnv — the Gymnasium environment (the heart)
 └── probe.py            calibration report for your robot's geometry
 ```
+
+The scene itself is the static file `mjcf/sysmic_v2_scene.xml` (see [Scene XML](#scene-xml)).
 
 Quick use:
 
@@ -21,7 +20,7 @@ Quick use:
 from sysmic_rl.pickplace import SysmicPickPlaceEnv, PickPlaceConfig
 
 cfg = PickPlaceConfig()
-cfg.scene.robot_xml = "mjcf/sysmic_v2.xml"       # or set $SYSMIC_ROBOT_XML
+cfg.scene.scene_xml = "mjcf/sysmic_v2_scene.xml"   # the default; or set $SYSMIC_SCENE_XML
 env = SysmicPickPlaceEnv(cfg, render_mode="human")
 obs, info = env.reset(seed=0, options={"object": "plate"})      # plate -> info["arm"] == "both"
 while True:
@@ -31,15 +30,36 @@ while True:
 ## The task in one picture
 
 ```
- objects START on the robot's own flat extrusion  ──►  carried by ONE arm or BOTH arms  ──►  PLACED on a table
- (auto-detected; may ride on the lift carriage)        (plate, bowl: both; glass, mug: one)    (new pose every episode, always reachable)
+ ALL utensils START in a row   ──►  the active one is carried by     ──►  PLACED on a table
+ on the robot's shelf               ONE arm or BOTH arms                   (new x, y, height, yaw every episode,
+ (shuffled order/spacing/yaw)       (plate, bowl: both; glass, mug: one)    filtered for reachability)
 ```
+
+---
+
+## <a name="scene-xml"></a>Scene XML — `mjcf/sysmic_v2_scene.xml`
+
+One static file, compiled once per env. It `<include>`s `sysmic_v2.xml` (never edited) and adds:
+
+| Element | What | Rewritten at every `reset()` |
+|---|---|---|
+| site `shelf` | usable top of the shelf on `base_link` (z = 0.496, 13.5 × 45.5 cm) | — (read once) |
+| geom `shelf_top` | invisible (group 3) collision box whose top face is the shelf surface | — |
+| `<contact><exclude>` base_link ↔ each utensil | MuJoCo collides the `base_link` mesh as its **convex hull**, which fills the shelf recess; the utensils ignore the hull and rest on `shelf_top` instead | — |
+| body `table` (geom `table_top` + 4 visual legs) | destination table; body origin = centre of the top face | `model.body_pos` (x, y, height) + `model.body_quat` (yaw) |
+| bodies `obj_plate/glass/bowl/mug` (free joints) | utensils, origin = centre of the base bottom | `data.qpos` (row on the shelf) |
+
+The legs are long enough for the highest table and simply sink below the (opaque) floor for lower tables, so no geom is resized at runtime.
+Utensil dimensions used by the code live in `config.OBJECT_SPECS` — keep them in sync with the XML geometry.
+
+**Adding a utensil:** add an `obj_<name>` body with a free joint (and an `<exclude>` against `base_link`) to the XML, its spec to `OBJECT_SPECS`,
+the name to `SceneConfig.objects`, then **re-collect demos and retrain** (the observation grows). All utensils must fit in a row on the shelf.
 
 ---
 
 ## `config.py` — every knob in one place
 
-Dataclasses nested into `PickPlaceConfig(scene, task, reward, source)`. Override fields in code (`cfg.task.max_episode_steps = 300`).
+Dataclasses nested into `PickPlaceConfig(scene, task, reward)`. Override fields in code (`cfg.task.max_episode_steps = 300`).
 
 ### `ArmSpec` / `LEFT_ARM` / `RIGHT_ARM` / `ARMS`
 | Field | Meaning |
@@ -53,26 +73,16 @@ Dataclasses nested into `PickPlaceConfig(scene, task, reward, source)`. Override
 ### `SceneConfig`
 | Field | Default | Meaning |
 |---|---|---|
-| `robot_xml` | `mjcf/sysmic_v2.xml` (or `$SYSMIC_ROBOT_XML`) | your robot file |
-| `objects` | plate, glass, bowl, mug | object pool. **Order and length change the observation size** |
-| `object_scale`, `friction` | 1.0, (1, 0.005, 0.0001) | object size multiplier; sliding/torsional/rolling friction |
-| `table_half_xy`, `table_thickness` | (0.18, 0.22), 0.04 | destination-table size |
-| `table_x`, `table_y`, `table_z` | (0.25,0.55), (−0.25,0.25), (0.55,1.05) | ranges the table **centre** and **top height** are sampled from each episode |
-| `table_clearance` | 0.03 | the table must be at least this far from every robot geom |
+| `scene_xml` | `mjcf/sysmic_v2_scene.xml` (or `$SYSMIC_SCENE_XML`) | the scene file |
+| `objects` | plate, glass, bowl, mug | utensils (must exist in the XML). **Order and length change the observation size** |
+| `shelf_site`, `shelf_min_gap` | `"shelf"`, 0.01 | site the row is laid out in; min free space between neighbours |
+| `table_x`, `table_y`, `table_z` | (0.35,0.65), (−0.25,0.25), (0.55,1.05) | ranges the table **centre** and **top height** are sampled from each episode |
+| `table_yaw` | (−π/2, π/2) | table yaw range (covers every orientation of a rectangle). Table size comes from the XML |
+| `table_clearance` | 0.03 | the table must be at least this far from every robot geom (`base_link` = its convex hull) |
 | `reach_check` | True | filter object/table poses with the reach cloud (disable to skip the ~1 s start-up cost) |
 | `reach_samples` | 50 000 | random arm configurations per arm in the reach cloud |
 | `reach_tol` | 0.04 | grasp point must be within this distance of a reachable sample |
 | `reach_axis_tol` | 0.5 rad | …and that sample's tool axis must be this close to the required one |
-
-### `SourceConfig` — where objects start
-| Field | Default | Meaning |
-|---|---|---|
-| `manual` | None | `(cx, cy, z, hx, hy)` world rectangle at the home pose. `None` = **auto-detect** by ray casting |
-| `body` | None | force detection onto one body (e.g. `"lift_carriage_link"`), or attach a manual rectangle to it |
-| `search_x/y/z` | (−0.1,0.6) / (−0.45,0.45) / (0.3,1.4) | box searched for the surface |
-| `step` | 0.01 | ray grid spacing (m) |
-| `min_area` | 0.01 m² | smallest patch accepted |
-| `edge_margin` | 0.015 | objects keep this far from the patch edge |
 
 ### `TaskConfig`
 | Group | Fields | Notes |
@@ -94,45 +104,12 @@ Weights of each reward term; see [Reward](#reward).
 
 ---
 
-## `objects.py` — tableware geometry
-* `ObjectSpec`: `height`, `radius` (outer footprint), `mass`, `grasp_style` (`"top"` pinch rim from above / `"side"` wrap the body), `rim_radius`, colour.
-* `make_object_specs(scale)`: dict of specs. The env, reachability check and expert read dimensions from here — keep in sync with the geometry.
-* `object_geoms_xml(name, scale, friction)`: plate/bowl = base disk + ring of 16 tilted boxes; glass = cylinder; mug = cylinder + box handle on local +y.
-* Object frame origin = **centre of the base bottom**, +z up, so resting on a surface means `z = surface height`.
-
-**Adding an object:** add the spec in `make_object_specs`, a branch in `object_geoms_xml`, the name in `SceneConfig.objects`,
-add it to the parametrised test, then **re-collect demos and retrain** (the observation grows).
-
----
-
-## `scene_builder.py`
-`build_scene_xml(SceneConfig) -> Path` writes `scene_pickplace.generated.xml` next to your robot XML (so relative mesh paths work) and returns the path.
-It `<include>`s your robot (never edited), adds a `table` body (slab + visual pedestal) and one free-body per object **parked far away**.
-The table is moved and its pedestal resized at every reset (`model.body_pos`, `geom_size`), so there is no recompilation per episode.
-
----
-
-## `surface.py` — finding the robot's "extrusion"
-**Why:** you want objects to start on a feature of the robot itself, whose shape I can't see. So the env finds it instead of guessing.
-
-How `detect_support_surface` works:
-1. Hide arm, object and table geoms; cast rays straight down (`mj_ray`, collision geoms only) over a grid covering `SourceConfig.search_*`.
-2. Group hits by height (5 mm bins); the **largest connected patch** (≥ `min_area`) wins. Body = the body most of its cells belong to.
-3. Shrink the patch by `edge_margin`. Store cells in world coordinates at scan time (+ the body's position then).
-4. `SupportSurface.sample(rng, radius, data)` returns a random point where a disk of that radius fits entirely on the patch (translated by however far the body has moved since the scan).
-5. `env.surface_moves` is True if the surface body changes height with the lift joint (e.g. carriage).
-
-Detection failing/choosing wrong? Run the probe, then set `SourceConfig.body="..."` (restrict to a body) or `SourceConfig.manual=(cx,cy,z,hx,hy)`.
-Limitation: only translation of the body is tracked (fine for a slide-joint carriage, not for a rotating link).
-
----
-
 ## `pickplace_env.py` — the environment
 `SysmicPickPlaceEnv(cfg=None, render_mode=None)` follows the Gymnasium API.
 
 ### Spaces
 * **Action** `Box(−1, 1, (13,))` = `[lift, left×6, right×6]` (6th entry of each arm = gripper). Inactive arms are masked to 0.
-* **Observation** `Box(−inf, inf, (94,))` with 4 objects. Layout in `env.obs_layout[name] → slice`:
+* **Observation** `Box(−inf, inf, (103,))` with 4 utensils. Layout in `env.obs_layout[name] → slice`:
 
 | Name | Size | Contents |
 |---|---|---|
@@ -149,6 +126,7 @@ Limitation: only translation of the body is tracked (fine for a slide-joint carr
 | `goal_pos`, `goal_rel_obj` | 3, 3 | goal and goal − object |
 | `active_arm` | 2 | `[left active, right active]` — `[1,1]` means a **bimanual** episode |
 | `contacts` | 4 | `[left finger, left jaw, right finger, right jaw]` touching the object |
+| `others_pos` | 9 | positions of the 3 inactive utensils (obstacles), in `objects` order |
 
 ### `grasp_plan()` — the central geometric helper
 `env.grasp_plan(obj_pos=None, sides=None) -> {side: (grasp_point, tool_axis)}` is used by the reward, observation, reach filter and expert.
@@ -157,24 +135,28 @@ Limitation: only translation of the body is tracked (fine for a slide-joint carr
 
 ### <a name="bimanual"></a>Bimanual episodes
 * Chosen per episode if the object is in `bimanual_objects` and `rng < bimanual_prob` (or force with `reset(options={"arm": "both"})`; `"left"`/`"right"` force one arm).
-* Object spawn is limited to `|y| ≤ bimanual_y_max` so both hands can reach opposite sides.
+* The active utensil is put in a middle slot of the shelf row and must satisfy `|y| ≤ bimanual_y_max`, so both hands can reach opposite sides.
 * "Grasped" = **every** active arm has finger **and** jaw contact. Reward `reach` = mean distance of both hands to their planned points.
 * `bimanual_style="down"`: both tools point down onto opposite rims (pinch from above). `"inward"`: tools point at each other horizontally (squeeze from the sides). Try the other if one never reaches.
 * `info["arm"] == "both"`; `evaluate.py` reports it as `arm:both`.
 
 ### `reset(seed, options)`
 1. Choose object and arm(s); set home pose (random lift, small joint noise).
-2. **Object pose:** sample on the source surface (up to 300 tries) until the grasp plan is reachable (and |y| small enough if bimanual).
-3. **Table:** sample centre/height in `table_*`; reject if it touches the robot (`table_clearance`) or the goal's grasp plan is unreachable; goal on the table, ≥ `min_goal_dist` from the object.
-4. Randomise friction/mass; place the object on the surface; settle 30 steps; move the red goal marker.
+2. **Shelf row:** all utensils in shuffled order along the shelf, random spacing (Dirichlet split of the spare width), x jitter where the
+   shelf depth allows (none for plate/bowl), random yaw (the mug's handle stays pointing front/back). Up to 100 tries until the active
+   utensil's grasp plan is reachable (and |y| small enough if bimanual).
+3. **Table:** sample centre/height/yaw in `table_*`; reject if it is within `table_clearance` of the robot (checked with `mj_geomDistance`:
+   the table and `base_link` are both world-welded, so MuJoCo would never report a contact between them) or the goal's grasp plan is
+   unreachable; the goal is sampled in the table frame, ≥ `min_goal_dist` from the object.
+4. Randomise friction/mass of the active utensil; write all utensil poses; settle 30 steps; move the red goal marker.
 5. If nothing feasible is found: `info["reach_fallback"]=True` (and a `RuntimeWarning` for the table) — your ranges don't match the arms' reach.
 
-Options: `object`, `arm`, `object_pos=(x,y)`, `goal_pos=(x,y)`, `table_pos=(x,y,z)`, `object_yaw`. Example:
+Options: `object`, `arm`, `goal_pos=(x,y)`, `table_pos=(x,y,z)` (+ `table_yaw`). Example:
 ```python
-env.reset(seed=1, options={"object": "plate", "arm": "both", "table_pos": (0.35, 0.0, 0.8), "goal_pos": (0.35, 0.05)})
+env.reset(seed=1, options={"object": "plate", "arm": "both", "table_pos": (0.45, 0.0, 0.8), "table_yaw": 0.3, "goal_pos": (0.40, 0.05)})
 ```
 
-### `step(action)` — see [ARCHITECTURE.md §4](ARCHITECTURE.md#4-what-happens-during-one-environment-step)
+### `step(action)` — see [README §4](../../../README.md#4-what-happens-during-one-environment-step)
 
 ### Reward <a name="reward"></a>
 Computed in `_reward_and_flags()`; terms returned in `info["reward_terms"]`.
@@ -188,22 +170,21 @@ Computed in `_reward_and_flags()`; terms returned in `info["reward_terms"]`.
 | `place` | `2` if at goal, upright, nearly still | correct final pose |
 | `release` | `1` if placed and no active gripper touching | let go |
 | `success` | `50` after `hold_steps` of placed+released | big bonus; ends episode |
-| `collision` | `−min(3, 0.5·n + 20·penetration)` | avoid hitting table/other arm |
+| `collision` | `−min(3, 0.5·n + 20·penetration)` | avoid hitting the table, the other arm and the **other utensils** |
 | `action_rate`, `velocity` | small quadratic penalties | smooth motion |
 | `fail` | `−10` on failure | object fell / tipped |
 
-Allowed contacts (not penalised): any arm geom with the active object; fingertips with the **table or the source surface**; any pair already touching at the home pose.
-Failure: object below `min(table top, source height) − 0.25 m`, or tilt > `fail_tilt`.
+Allowed contacts (not penalised): any arm geom with the **active** utensil; fingertips with the **table or the shelf/base**; any pair already touching at the home pose.
+Touching an inactive utensil is a collision. Failure: object below `min(table top, shelf height) − 0.25 m`, or tilt > `fail_tilt`.
 
 ### Helper methods used by other modules
-`grasp_point(side)`, `tool_axis_world(side)`, `grasp_plan()`, `reachable(plan, sides, source)`, `seed_config(goals)`, `object_pos()`, `is_grasping()`, `joint_pos()`,
-`arm_dofs(side)`, attributes `sides`, `target`, `act_scale`, `action_mask`, `sl`, `lift_dof`, `finger_bid`, `goal_pos`, `surface`, `surface_moves`, `spec`.
+`grasp_point(side)`, `tool_axis_world(side)`, `grasp_plan()`, `reachable(plan, sides)`, `seed_config(goals)`, `object_pos()`, `is_grasping()`, `joint_pos()`,
+`arm_dofs(side)`, `table_to_world(uv)` / `world_to_table(xy)`, attributes `sides`, `target`, `act_scale`, `action_mask`, `sl`, `lift_dof`, `finger_bid`, `goal_pos`, `shelf`, `spec`.
 The **expert** relies on them — update `imitation/expert.py` if you rename one.
 
 ### Reachability (why episodes are always feasible)
 At start-up the env samples `reach_samples` random (lift, 5 joints) configurations per arm and stores grasp point, tool axis and joints (kinematics only, ~1 s).
 `reachable()` asks: is there a sample whose grasp point is within `reach_tol` of the plan point **and** whose tool axis is within `reach_axis_tol` of the required one?
-For objects on a carriage-mounted surface, samples are compared in the carriage frame (the lift height cancels out).
 `seed_config()` returns the best sample as a starting pose for the expert. This is a *necessary-ish* test (it ignores collisions and joint dynamics), not a proof.
 
 ---
@@ -211,11 +192,11 @@ For objects on a carriage-mounted surface, samples are compared in the carriage 
 ## `probe.py` — calibration report <a name="calibration"></a>
 
 ```bash
-uv run python -m sysmic_rl.pickplace.probe --robot-xml mjcf/<robot>.xml --samples 20000
+uv run python -m sysmic_rl.pickplace.probe --samples 20000      # [--scene-xml mjcf/sysmic_v2_scene.xml]
 ```
 Sections:
-1. **Source surface** — body, top height, extent, usable area, `moves_with_lift`. Check it is the extrusion you meant.
-2. **Reachability** — per object: % of spawn spots reachable with one arm and with both arms, and % of random table poses that are collision-free *and* have a reachable goal.
+1. **Shelf** — the site rectangle and how far below the arm bases it is at lift 0 / max.
+2. **Reachability** — per utensil: % of shelf spawns reachable with one arm and with both arms, % of random table poses clear of the robot, and % that also have a reachable goal.
    Low numbers tell you what to change: widen/shift `table_*`, give the object a different `grasp_style`, fix `grasp_offset`/gripper angles, relax `reach_axis_tol`.
 3. **Home-pose contacts** (auto-ignored by the reward). 4. **Gripper sweep** — smaller jaw↔finger distance = closed → set `gripper_open_q/close_q`. 5. **Reachable envelope** for hand-tuning.
 
@@ -227,8 +208,8 @@ After the probe, *look* at the scene (`render_mode="human"`) and move `ArmSpec.g
 
 | Change | How | Watch out for |
 |---|---|---|
-| Different table range/size | `SceneConfig.table_*` | re-run probe; check "table pose+goal ok" |
-| Objects start elsewhere | `SourceConfig.manual/body` | verify with probe + viewer |
+| Different table range | `SceneConfig.table_*` | re-run probe; check "goal reachable" |
+| Different table size / shelf | edit `table_top` / the `shelf` site + `shelf_top` geom in the scene XML | verify with probe + viewer |
 | New reward term | add to `terms` in `_reward_and_flags()` + `RewardConfig` | demos store old rewards → re-collect |
 | New observation | `_obs_parts()` | dims change → demos/models invalid |
 | More bimanual objects | `TaskConfig.bimanual_objects` | re-collect; check probe "both-arms" % |

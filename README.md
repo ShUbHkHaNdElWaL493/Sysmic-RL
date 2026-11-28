@@ -8,9 +8,9 @@ Detailed per-package references:
 
 | Package | Doc | One-line purpose |
 |---|---|---|
-| `sysmic_rl.pickplace` | [./src/sysmic_rl/pickplace/README.md](README.md) | The *world*: scene, objects, the Gym environment, reward, calibration probe |
-| `sysmic_rl.imitation` | [./src/sysmic_rl/imitation/README.md](README.md) | The *teacher*: scripted expert, demo recording, behaviour cloning, DAgger |
-| `sysmic_rl.training` | [./src/sysmic_rl/training/README.md](README.md) | The *learner*: SAC setup, fine-tuning from demos, evaluation |
+| `sysmic_rl.pickplace` | [pickplace/README.md](src/sysmic_rl/pickplace/README.md) | The *world*: scene, objects, the Gym environment, reward, calibration probe |
+| `sysmic_rl.imitation` | [imitation/README.md](src/sysmic_rl/imitation/README.md) | The *teacher*: scripted expert, demo recording, behaviour cloning, DAgger |
+| `sysmic_rl.training` | [training/README.md](src/sysmic_rl/training/README.md) | The *learner*: SAC setup, fine-tuning from demos, evaluation |
 
 ---
 
@@ -37,7 +37,7 @@ accidentally stumble into a successful grasp before it learns anything. So we do
 | Term | Meaning | Where it lives here |
 |---|---|---|
 | **Environment** | The simulated world. You give it an action, it returns what happened. | `pickplace/pickplace_env.py` → `SysmicPickPlaceEnv` |
-| **Observation** (`obs`) | The vector of numbers the policy sees (joint angles, object pose, goal, contacts, …). 94 numbers with 4 objects. | `_obs_parts()` in the env; layout in `env.obs_layout` |
+| **Observation** (`obs`) | The vector of numbers the policy sees (joint angles, object pose, goal, contacts, …). 103 numbers with 4 utensils. | `_obs_parts()` in the env; layout in `env.obs_layout` |
 | **Action** | The vector the policy outputs: 13 numbers in [-1, 1] (lift + 2 arms × 6 joints). Each is "move this joint target a bit". | `step()` in the env |
 | **Reward** | A number after every step saying how well things are going. RL maximises the *sum* of rewards. | `_reward_and_flags()`; weights in `RewardConfig` |
 | **Step / Episode** | One policy decision (20 ms of sim) / one attempt at the task (≤ 400 steps). | `step()` / `reset()` |
@@ -63,10 +63,7 @@ the training code just calls it millions of times and nudges the network toward 
 ```
 src/sysmic_rl/
 ├── pickplace/            THE WORLD (no learning code, no torch)
-│   ├── config.py         every tunable number (dataclasses)
-│   ├── objects.py        procedural plate/bowl/glass/mug geometry
-│   ├── scene_builder.py  writes the scene XML that <include>s your robot (+ spawnable table, object pool)
-│   ├── surface.py        finds the robot's own flat "extrusion" by ray casting (where objects start)
+│   ├── config.py         every tunable number (dataclasses) + utensil dimensions (OBJECT_SPECS)
 │   ├── pickplace_env.py  the Gymnasium environment (the heart)
 │   └── probe.py          calibration report for YOUR robot's geometry
 │
@@ -82,7 +79,8 @@ src/sysmic_rl/
     └── evaluate.py       success-rate measurement for any policy
 
 tests/                    pytest suite + a mesh-free stub robot
-docs/                     these documents
+mjcf/sysmic_v2.xml        the robot (meshes in mjcf/meshes/) — never edited by the code
+mjcf/sysmic_v2_scene.xml  the scene: <include>s the robot + shelf proxy + table + 4 utensils (poses randomised at reset)
 ```
 
 ### Dependency rules (keep these when you edit)
@@ -90,12 +88,8 @@ docs/                     these documents
 ```mermaid
 flowchart LR
   subgraph pickplace
-    C[config] --> SB[scene_builder]
-    O[objects] --> SB
-    C --> E[pickplace_env]
-    O --> E
-    SB --> E
-    S[surface] --> E
+    XML[(sysmic_v2_scene.xml)] --> E[pickplace_env]
+    C[config] --> E
     E --> P[probe]
   end
   subgraph imitation
@@ -133,7 +127,7 @@ policy output a (13 numbers in [-1,1])
  │ 4. clamp target to [qpos ± max_lag] and joint limits (anti-windup: target can't run away from the real joint)
  │ 5. 10 × { interpolate ctrl toward target ; mj_step }    → 10 × 2 ms = 20 ms (50 Hz control)
  ▼
- read new state → build observation (94-D) → compute reward terms → check success / failure / timeout
+ read new state → build observation (103-D) → compute reward terms → check success / failure / timeout
  ▼
  return (obs, reward, terminated, truncated, info)
 ```
@@ -146,17 +140,16 @@ outputs torques — it nudges targets. This is the same scheme as your original 
 ## 4b. Where things start and end, and one arm vs both arms
 
 ```
- robot (fixed base) ── lift carriage ── "extrusion" (flat shelf)  ← objects START here (auto-detected, surface.py)
-        │                                   │
-   left arm ◄──────── object ──────────► right arm
+ robot (fixed base) ── shelf on the base (static) ← ALL utensils START here, in a shuffled row
+        │                     │
+   left arm ◄──────── active utensil ──────────► right arm
         │
-        └──── destination TABLE: new pose/height every episode, always inside the arms' reach ← objects are PLACED here
+        └──── destination TABLE: new x/y/height/yaw every episode, filtered for reach ← the active utensil is PLACED here
 ```
-* **Source surface.** At start-up the env casts rays straight down over a grid and finds the largest flat patch on the robot's
-  collision geoms (arms, objects and the table are ignored). Objects spawn only where a disk of their radius fits on that patch.
-  If the patch is on a body that rides on the lift (the carriage), reach is computed in the carriage frame and the expert keeps
-  the lift fixed until the object is grasped.
-* **Spawned table.** Each reset samples a table centre/height inside `SceneConfig.table_x/y/z`, rejects poses that touch the robot
+* **Shelf.** The `shelf` site in `mjcf/sysmic_v2_scene.xml` marks the shelf on the robot's base (z = 0.496, 13.5 × 45.5 cm). Every reset
+  lays all four utensils out along it in shuffled order with random spacing and yaw; the inactive ones are obstacles (touching them is
+  a collision and their positions are in the observation). The scene is compiled once: poses are written into `data.qpos`.
+* **Table.** Each reset samples a table centre/height/yaw inside `SceneConfig.table_x/y/z/yaw` (written to `model.body_pos/body_quat`), rejects poses that touch the robot
   (with `table_clearance` of margin), samples a goal on the table, and rejects it unless the grasp pose there is **reachable**
   (a kinematic reach cloud built at start-up: 50 000 random arm configurations per arm).
 * **One arm or both.** Objects in `TaskConfig.bimanual_objects` (default plate, bowl) are carried with **both** arms: left hand on
@@ -193,18 +186,19 @@ uv add stable-baselines3 h5py tensorboard
 uv add --dev pytest
 uv run pytest
 ```
-Checks the code works on a fake robot (`tests/stub_robot.py`). **Success:** `7 passed`.
+Runs the environment, expert and demo pipeline on the real scene. **Success:** `18 passed`.
+(If pytest fails to load a `launch_testing` plugin, ROS is on your `PYTHONPATH`: run `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest`.)
 
 ### Stage 1 — calibrate (the most important stage)
 ```bash
-uv run python -m sysmic_rl.pickplace.probe --robot-xml mjcf/<your_robot>.xml
+uv run python -m sysmic_rl.pickplace.probe
 ```
-Prints (a) the **support surface it detected on your robot** (body, height, size, whether it moves with the lift),
-(b) what fraction of spawn spots and table poses are **reachable** per object, for one arm and for both arms,
+Prints (a) the **shelf** rectangle and how far below the arm bases it is,
+(b) what fraction of shelf spawns and table poses are **reachable** per utensil, for one arm and for both arms,
 (c) which gripper angle is open/closed, (d) rest-pose contacts and the reachable envelope.
-Then edit `pickplace/config.py`: `SourceConfig` (if the wrong patch was detected), the `table_*` ranges, `gripper_open_q`,
-`gripper_close_q`, `arm_home`, each `ArmSpec.grasp_offset`. See [pickplace.md §Calibration](pickplace.md#calibration).
-**Success:** the detected surface is the extrusion you meant; reachability percentages are high (≳70 %) for the objects you care about; you know which gripper angle is "open".
+Then edit `pickplace/config.py`: the `table_*` ranges, `gripper_open_q`,
+`gripper_close_q`, `arm_home`, each `ArmSpec.grasp_offset`. See [pickplace §Calibration](src/sysmic_rl/pickplace/README.md#calibration).
+**Success:** reachability percentages are high (≳70 %) for the objects you care about; you know which gripper angle is "open".
 
 ### Stage 2 — look at it
 ```bash
@@ -218,7 +212,7 @@ the object? Does it close on it? If the grasp point is visibly off, tune `grasp_
 uv run python -m sysmic_rl.training.evaluate --expert --episodes 100
 ```
 **Success:** ≥ 85 % overall, no object below ~60 %. If not, tune `ExpertConfig` or geometry
-([imitation.md §Tuning the expert](imitation.md#tuning-the-expert)). Everything downstream copies the expert, so
+([imitation §Tuning the expert](src/sysmic_rl/imitation/README.md#tuning-the-expert)). Everything downstream copies the expert, so
 a 40 %-expert gives a 40 %-ceiling.
 
 ### Stage 4 — collect demonstrations
@@ -254,7 +248,7 @@ uv run python -m sysmic_rl.training.train_sac --demos data/demos.h5 data/dagger1
 tensorboard --logdir runs
 ```
 Run takes hours. **Success:** `eval/success_rate` in TensorBoard starts near the BC level and climbs; it should
-not crash to zero in the first 50 k steps (if it does, see [training.md §Troubleshooting](training.md#troubleshooting)).
+not crash to zero in the first 50 k steps (if it does, see [training §Troubleshooting](src/sysmic_rl/training/README.md#troubleshooting)).
 
 ### Stage 9 — final evaluation
 ```bash
@@ -268,7 +262,6 @@ Per-object and per-arm success rates are printed.
 
 | Path | Created by | Contents | Safe to delete? |
 |---|---|---|---|
-| `mjcf/scene_pickplace.generated.xml` | `scene_builder` (every env construction) | table + objects + `<include>` of your robot | yes (regenerated) |
 | `data/*.h5` | `collect.py` | demonstrations | only if you can re-collect |
 | `runs/bc*/bc_sac.zip` | `bc.py` | BC-pretrained SAC model | yes |
 | `runs/sac/` | `train_sac.py` | TensorBoard logs, `sac_*_steps.zip` checkpoints, `best_model.zip`, `evaluations.npz`, `final.zip` | keep `best_model.zip` |
@@ -280,10 +273,10 @@ Per-object and per-arm success rates are printed.
 | I want to… | Edit | Then you must… |
 |---|---|---|
 | Change where the table may appear / its size | `SceneConfig.table_*` in `config.py` | re-run probe + stage 2 |
-| Objects start on the wrong part of the robot | `SourceConfig` (`manual=` or `body=`) | re-run probe |
+| Change where the utensils start | the `shelf` site + `shelf_top` geom in `mjcf/sysmic_v2_scene.xml` | re-run probe |
 | Which objects are carried with both hands | `TaskConfig.bimanual_objects`, `bimanual_prob`, `bimanual_style` | re-collect demos |
 | Change gripper angles / home pose | `TaskConfig` | re-run stage 3 onward |
-| Add or edit an object (shape, size, mass) | `objects.py` (+ `SceneConfig.objects`) | **re-collect demos & retrain** (obs size changes if you add an object) |
+| Add or edit a utensil (shape, size, mass) | `mjcf/sysmic_v2_scene.xml` + `OBJECT_SPECS` (+ `SceneConfig.objects`) | **re-collect demos & retrain** (obs size changes if you add an object) |
 | Change what is rewarded | `RewardConfig` / `_reward_and_flags()` | **re-collect demos** (they store old rewards) and restart RL |
 | Change how fast joints move | `TaskConfig.*_action_scale`, `ema_alpha` | re-collect demos & retrain |
 | Add something to the observation | `_obs_parts()` | **everything downstream is invalidated** (dims change) |
@@ -296,7 +289,7 @@ Per-object and per-arm success rates are printed.
 
 A saved artefact is only valid for the code it was made with:
 
-* **Demos (`.h5`)** contain observations (94-D), rewards, and actions made under specific settings. Change the
+* **Demos (`.h5`)** contain observations (103-D), rewards, and actions made under specific settings. Change the
   observation, the reward, the action scales, the object list, or the physics scene → re-collect.
 * **Model zips** have fixed input/output sizes and network width. Change obs size or `net` → retrain.
 * When in doubt, delete `data/` and `runs/` and redo stages 4–8. Stage 4 takes minutes.
@@ -324,11 +317,9 @@ term the agent farms (e.g. hovering near the object collects `reach` forever). F
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `FileNotFoundError: Robot MJCF not found` | wrong robot path | `--robot-xml …` or `export SYSMIC_ROBOT_XML=…` |
+| `ValueError` loading the scene XML | wrong scene path | `--scene-xml …` or `export SYSMIC_SCENE_XML=…` |
 | Expert stuck in `seed`/`pre`/`approach` | target unreachable or wrong tool axis | probe reachability %, widen `table_*`, check `ArmSpec.tool_axis`, try `bimanual_style="inward"` |
 | `RuntimeWarning: No reachable table pose found` | `table_*` ranges don't intersect the arms' reach | probe; widen/shift ranges (info key `reach_fallback` marks those episodes) |
-| `Could not find a flat support surface` | extrusion outside the search box / not a collision geom | widen `SourceConfig.search_*` or set `SourceConfig.manual` |
-| Object slides/rides away when the lift moves | surface is on the carriage | expected; expert locks lift until grasp; keep `lift_action_scale` small |
 | Plate grasp never closes on both sides | grasp offset / gripper sign / rim position | probe gripper sweep; tune `ArmSpec.grasp_offset`, `bimanual_style` |
 | Expert grasps but object slips | friction / grip force / wrong gripper sign | check `gripper_close_q`; add pad geoms; raise friction |
 | `n_bad_contacts` always > 0 | rest-pose mesh overlap | probe lists them; they're auto-ignored at home pose, otherwise add `<exclude>` to your MJCF |
@@ -340,7 +331,7 @@ term the agent farms (e.g. hovering near the object collects `reach` forever). F
 
 ## 10. Scope & limitations (honest status)
 
-* Built and smoke-tested on a mesh-free stub robot (with a toy shelf on the carriage); **calibration on your real robot is required** before the expert works. Surface detection, reach filtering and the bimanual expert were exercised on the stub only: the stub expert reaches the grasp and lift phases but not full success because its fingers are toy geometry.
+* Tested on the real `sysmic_v2_scene.xml`. **Calibration is still required** before the expert works: with the current `grasp_offset` / gripper guesses the probe reports low reachability for the shelf and the table (see Stage 1).
 * The torch/SB3 scripts (`bc.py`, `train_sac.py`, `common.py`) were not executed during development — expect small fixes.
 * State-based observations (perfect object pose). Vision would be a later distillation step.
 * One environment instance per training run (demo pre-fill assumes it).

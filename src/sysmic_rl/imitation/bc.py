@@ -60,11 +60,11 @@ if __name__ == "__main__":
     p.add_argument("--out", default="runs/bc")
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--device", default="auto")
-    p.add_argument("--robot-xml", default=None)
+    p.add_argument("--scene-xml", default=None)
     a = p.parse_args()
     cfg = PickPlaceConfig()
-    if a.robot_xml:
-        cfg.scene.robot_xml = a.robot_xml
+    if a.scene_xml:
+        cfg.scene.scene_xml = a.scene_xml
     env = make_vec_env(cfg)
     model = build_sac(env, a.out, device=a.device)
     parts = [load_demos(f)[0] for f in a.demos]

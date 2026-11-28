@@ -48,12 +48,12 @@ if __name__ == "__main__":
     ap.add_argument("--steps", type=int, default=1_000_000)
     ap.add_argument("--warmup", type=int, default=20_000, help="critic-only gradient steps")
     ap.add_argument("--device", default="auto")
-    ap.add_argument("--robot-xml", default=None)
+    ap.add_argument("--scene-xml", default=None)
     a = ap.parse_args()
 
     cfg = PickPlaceConfig()
-    if a.robot_xml:
-        cfg.scene.robot_xml = a.robot_xml
+    if a.scene_xml:
+        cfg.scene.scene_xml = a.scene_xml
     env, eval_env = make_vec_env(cfg, 0), make_vec_env(cfg, 10_000)
     model = build_sac(env, a.out, device=a.device)
     if a.init:

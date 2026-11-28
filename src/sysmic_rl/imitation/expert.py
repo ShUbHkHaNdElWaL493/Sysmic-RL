@@ -44,7 +44,7 @@ class ScriptedExpert:
         self.lift_z = {}
         self.seed = None
 
-    def _goto(self, env, goals, lock_lift=False):
+    def _goto(self, env, goals):
         """goals: {side: (target_point, tool_axis, gripper_q)} -> (action[13], max_pos_err, max_axis_err)."""
         c, m, d = self.cfg, env.model, env.data
         sides = list(goals)
@@ -62,7 +62,7 @@ class ScriptedExpert:
             ax_err = max(ax_err, float(np.arccos(np.clip(a @ tax, -1, 1))))
         J, e = np.vstack(J_rows), np.concatenate(e_rows)
         cs = np.ones(len(cols))
-        cs[0] = 1e-3 if lock_lift else c.lift_col_scale   # lock: the target rides on the lift, IK must not use it
+        cs[0] = c.lift_col_scale
         Jw = J * cs
         dq = cs * (Jw.T @ np.linalg.solve(Jw @ Jw.T + c.damping ** 2 * np.eye(len(e)), e))
 
@@ -93,7 +93,6 @@ class ScriptedExpert:
         grasping = env.is_grasping()
         timeout = self.t > c.phase_timeout
         G = lambda tgt, gq: {s: (tgt[s], plan[s][1], gq) for s in sides}
-        lock = env.surface_moves and self.phase <= CLOSE   # object still sits on the lift-mounted surface
 
         if self.phase in (LIFT, TRANSPORT, LOWER):  # recovery when the object is lost
             self.lost = 0 if grasping else self.lost + 1
@@ -106,7 +105,7 @@ class ScriptedExpert:
             # Global-IK seed: jump (in joint space) near a configuration that already has the right pose.
             if self.seed is None:
                 pre = {s: (plan[s][0] - plan[s][1] * c.pre_dist, plan[s][1]) for s in sides}
-                self.seed = env.seed_config(pre, source=True) or "none"
+                self.seed = env.seed_config(pre) or "none"
             a = np.zeros(13)
             if self.seed == "none":
                 self._advance(PRE)
@@ -125,15 +124,15 @@ class ScriptedExpert:
                 if err < c.seed_tol or timeout:
                     self._advance(PRE)
         elif ph == PRE:
-            a, ep, er = self._goto(env, G({s: plan[s][0] - plan[s][1] * c.pre_dist for s in sides}, gq_open), lock)
+            a, ep, er = self._goto(env, G({s: plan[s][0] - plan[s][1] * c.pre_dist for s in sides}, gq_open))
             if (ep < c.pos_tol * 1.5 and er < c.axis_tol) or timeout:
                 self._advance(APPROACH)
         elif ph == APPROACH:
-            a, ep, _ = self._goto(env, G({s: plan[s][0] for s in sides}, gq_open), lock)
+            a, ep, _ = self._goto(env, G({s: plan[s][0] for s in sides}, gq_open))
             if ep < c.pos_tol or timeout:
                 self._advance(CLOSE)
         elif ph == CLOSE:
-            a, _, _ = self._goto(env, G({s: plan[s][0] for s in sides}, gq_close), lock)
+            a, _, _ = self._goto(env, G({s: plan[s][0] for s in sides}, gq_close))
             if (self.t >= c.close_steps and grasping) or self.t > c.close_steps * 4:
                 self.lift_z = {s: pts[s][2] + c.lift_height for s in sides}
                 self._advance(LIFT)

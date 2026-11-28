@@ -63,11 +63,11 @@ if __name__ == "__main__":
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--policy", default=None, help="SB3 SAC zip for DAgger rollouts")
     p.add_argument("--beta", type=float, default=1.0, help="prob. expert drives each step (DAgger mix)")
-    p.add_argument("--robot-xml", default=None)
+    p.add_argument("--scene-xml", default=None)
     a = p.parse_args()
     cfg = PickPlaceConfig()
-    if a.robot_xml:
-        cfg.scene.robot_xml = a.robot_xml
+    if a.scene_xml:
+        cfg.scene.scene_xml = a.scene_xml
     pol = None
     if a.policy:
         from stable_baselines3 import SAC

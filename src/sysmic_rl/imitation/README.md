@@ -20,7 +20,7 @@ start: it already knows roughly what a good grasp looks like, so RL only has to 
 |---|---|---|---|
 | **Behaviour cloning (BC)** | supervised: predict the expert's action from the observation | simple, fast, stable | errors compound; the policy drifts into states the expert never visited |
 | **DAgger** | policy drives, expert labels the states the policy actually visits | fixes the drift | needs the expert to be queryable at any state (ours is, because it reads simulator state) |
-| **Demo-seeded RL** | RL whose replay buffer starts with expert data | improves beyond the expert | needs RL machinery → see [training.md](training.md) |
+| **Demo-seeded RL** | RL whose replay buffer starts with expert data | improves beyond the expert | needs RL machinery → see [training/README.md](../training/README.md) |
 
 ---
 
@@ -28,7 +28,7 @@ start: it already knows roughly what a good grasp looks like, so RL only has to 
 
 ### What it is
 A hand-written controller that **cheats**: it reads the exact object pose, goal, contacts from the simulator
-(the neural network only gets the 94-number observation). It handles **one arm or both** (plates/bowls are carried bimanually). It outputs actions in the **same 13-D normalised space**
+(the neural network only gets the 103-number observation). It handles **one arm or both** (plates/bowls are carried bimanually). It outputs actions in the **same 13-D normalised space**
 as the policy, so its outputs are directly usable as supervised labels.
 
 ### How it works
@@ -42,7 +42,6 @@ as the policy, so its outputs are directly usable as supervised labels.
    * Stacks, per arm, 3 position rows + 3 orientation rows (rotation about the tool axis ignored → wrist roll stays free). Unknowns: lift + 5 joints per arm.
    * Both arms share the lift joint, so solving them together avoids conflicting lift commands.
    * Converts `dq` into the normalised action `(q_now + dq − q_target)/scale`, clipped to [−1, 1].
-   * **Lift lock:** if the object sits on a lift-mounted surface (`env.surface_moves`), the lift column is disabled until the object is grasped (otherwise the "target" would ride away with the arm).
 3. **Phases** (state machine):
 
 | Phase | Goal | Moves on when |
@@ -83,7 +82,7 @@ action = expert.act(env)                            # takes the ENV (privileged)
 | `rot_weight` | 0.15 | position OK but wrong orientation (up); position error large because orientation dominates (down) | tune; 1 rad of tilt ≈ `1/rot_weight` m of position error |
 | `seed_tol` | 0.06 rad | seed phase never finishes | larger |
 | `retreat_dist` | 0.04 m | gripper drags the object when backing away | larger |
-| `lift_col_scale` | 0.5 | lift joint wobbling / overused | smaller = uses lift less (it is fully locked pre-grasp on a lift-mounted surface) |
+| `lift_col_scale` | 0.5 | lift joint wobbling / overused | smaller = uses lift less |
 | `close_steps` | 15 | gripper doesn't squeeze enough before lifting | larger |
 | `release_steps` | 12 | object dragged away on release | larger |
 | `phase_timeout` | 150 | — | the safety net; rarely changed |
@@ -109,7 +108,7 @@ action = expert.act(env)                            # takes the ENV (privileged)
 ```
 demos.h5
 ├── ep_00000/
-│   ├── obs             (T+1, 94) float32   observation before every step + the final one
+│   ├── obs             (T+1, 103) float32   observation before every step + the final one
 │   ├── actions         (T, 13)             what was EXECUTED (may include noise)
 │   ├── expert_actions  (T, 13)             what the expert WANTED (clean labels)
 │   ├── rewards         (T,)
@@ -152,7 +151,7 @@ uv run python -m sysmic_rl.imitation.collect --episodes 100 --policy runs/bc/bc_
 | `--seed` | base seed; episode *i* uses `seed·100003 + i` |
 | `--policy` | SB3 SAC zip; enables DAgger mode |
 | `--beta` | probability that the **expert** drives each step (1.0 = pure expert; lower = more policy) |
-| `--robot-xml` | override robot path |
+| `--scene-xml` | override scene path |
 
 Behaviour:
 * Prints running expert success every 10 episodes and a per-object summary at the end.

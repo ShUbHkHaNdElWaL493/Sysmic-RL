@@ -7,7 +7,7 @@ def main() -> None:
     parser.add_argument(
         "-m", "--mjcf",
         type=str,
-        default=os.path.join('mjcf', 'sysmic_v2.xml'),
+        default=os.path.join('mjcf', 'sysmic_v2_scene.xml'),
         help="Path to the MJCF file (.xml)"
     )
     args = parser.parse_args()
