@@ -243,13 +243,6 @@
         </body>
       </body>
     </body>
-
-    <body name="left_target" mocap="true" pos="0 0 0">
-      <geom type="sphere" size="0.03" rgba="1 0 0 0.5" contype="0" conaffinity="0"/>
-    </body>
-    <body name="right_target" mocap="true" pos="0 0 0">
-      <geom type="sphere" size="0.03" rgba="0 0 1 0.5" contype="0" conaffinity="0"/>
-    </body>
   </worldbody>
 
   <!-- ==================== CONTACT EXCLUSIONS ==================== -->
