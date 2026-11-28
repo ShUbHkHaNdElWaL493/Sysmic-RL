@@ -8,9 +8,9 @@ Detailed per-package references:
 
 | Package | Doc | One-line purpose |
 |---|---|---|
-| `sysmic_rl.pickplace` | [pickplace.md](pickplace.md) | The *world*: scene, objects, the Gym environment, reward, calibration probe |
-| `sysmic_rl.imitation` | [imitation.md](imitation.md) | The *teacher*: scripted expert, demo recording, behaviour cloning, DAgger |
-| `sysmic_rl.training` | [training.md](training.md) | The *learner*: SAC setup, fine-tuning from demos, evaluation |
+| `sysmic_rl.pickplace` | [./src/sysmic_rl/pickplace/README.md](README.md) | The *world*: scene, objects, the Gym environment, reward, calibration probe |
+| `sysmic_rl.imitation` | [./src/sysmic_rl/imitation/README.md](README.md) | The *teacher*: scripted expert, demo recording, behaviour cloning, DAgger |
+| `sysmic_rl.training` | [./src/sysmic_rl/training/README.md](README.md) | The *learner*: SAC setup, fine-tuning from demos, evaluation |
 
 ---
 
