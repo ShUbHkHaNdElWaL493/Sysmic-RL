@@ -14,12 +14,12 @@ import numpy as np
 
 from sysmic_rl.imitation.dataset import DemoWriter
 from sysmic_rl.imitation.expert import ExpertConfig, ScriptedExpert
-from sysmic_rl.pickplace import PickPlaceConfig, SysmicPickPlaceEnv
+from sysmic_rl.env import SysmicBotConfig, SysmicBotEnv
 
 
 def collect(n_episodes, out, cfg=None, noise=0.0, seed=0, policy=None, beta=1.0, keep_failures=None, log=print):
-    cfg = cfg or PickPlaceConfig()
-    env = SysmicPickPlaceEnv(cfg)
+    cfg = cfg or SysmicBotConfig()
+    env = SysmicBotEnv(cfg)
     expert = ScriptedExpert(ExpertConfig())
     rng = np.random.default_rng(seed)
     keep_failures = (policy is not None) if keep_failures is None else keep_failures
@@ -65,7 +65,7 @@ if __name__ == "__main__":
     p.add_argument("--beta", type=float, default=1.0, help="prob. expert drives each step (DAgger mix)")
     p.add_argument("--scene-xml", default=None)
     a = p.parse_args()
-    cfg = PickPlaceConfig()
+    cfg = SysmicBotConfig()
     if a.scene_xml:
         cfg.scene.scene_xml = a.scene_xml
     pol = None

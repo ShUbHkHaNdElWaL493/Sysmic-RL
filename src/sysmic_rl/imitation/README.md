@@ -97,7 +97,7 @@ action = expert.act(env)                            # takes the ENV (privileged)
 
 > Grasp points live in `config.OBJECT_SPECS` and the pitches in `TaskConfig.*_pitch` (the env's grasp plan), not in `ExpertConfig`.
 
-> The expert relies on the calibrated `ArmSpec` (grasp offset, tool and closing axes) and gripper angles — re-check them with the probe if you change the robot model.
+> The expert relies on the calibrated `ArmSpec` (grasp offset, tool and closing axes) and gripper angles — `uv run pytest -k gripper` re-checks them against the robot model.
 
 ---
 
@@ -204,5 +204,5 @@ evaluate by running the policy (`training/evaluate.py`), because small per-step 
   from `env._get_obs()`, actions must be in the env's 13-D normalised space, and set `success=True` in attrs. Pass `expert_actions=actions`.
 * **Replace the expert** with a different controller: keep the `reset()` / `act(env) -> (13,)` interface and everything else works.
 * **Change the BC network:** don't edit `bc.py`; change `net` in `training/common.py:build_sac` (BC trains whichever actor it is given).
-* **Add a grasp style:** extend `SysmicPickPlaceEnv.grasp_plan()` (styles: `rim`, `stem`, `handle`).
+* **Add a grasp style:** extend `SysmicBotEnv.grasp_plan()` (styles: `rim`, `stem`, `handle`).
 * After changing the expert always re-run `evaluate --expert`, then **re-collect** — old demos reflect the old expert.

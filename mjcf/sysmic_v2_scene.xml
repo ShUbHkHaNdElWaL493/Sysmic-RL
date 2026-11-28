@@ -2,9 +2,10 @@
 <!--
   Sysmic V2 pick-and-place scene: robot + 4 utensils on the robot's shelf + a destination table.
 
-  This file is static. SysmicPickPlaceEnv.reset() randomises every pose at runtime without recompiling:
+  This file is static. SysmicBotEnv.reset() randomises every pose at runtime without recompiling:
     * utensils (free joints)   -> data.qpos        (row along the shelf, shuffled order / spacing / yaw)
     * table (static body)      -> model.body_pos / model.body_quat (x, y, yaw; the top height is fixed)
+    * goal marker (mocap)      -> data.mocap_pos
   The poses below are only a valid default (what the viewer shows).
 -->
 <mujoco model="sysmic_v2_scene">
@@ -42,10 +43,15 @@
       <geom name="table_leg_rr" type="box" size="0.02 0.02 0.405" pos="-0.22 -0.22 -0.445" contype="0" conaffinity="0" rgba="0.4 0.3 0.2 1"/>
     </body>
 
+    <!-- Goal marker (visual only): reset() moves it to 3 cm above the goal on the table. -->
+    <body name="goal" mocap="true" pos="0.55 0 0.88">
+      <geom name="goal_marker" type="sphere" size="0.012" rgba="1 0.1 0.1 0.6" contype="0" conaffinity="0" group="1"/>
+    </body>
+
     <!-- Utensils. Origin = centre of the base bottom, +z up. Each has a smooth visual mesh (group 2, no collision,
          meshes/utensils/*.obj) and invisible primitive collision geoms (group 3) that keep the real shape: MuJoCo would
          collide a mesh as its convex hull, filling the hollow mug/bowl/plate and the mug handle's hole.
-         The mass comes from the collision geoms. Must match OBJECT_SPECS in src/sysmic_rl/pickplace/config.py. -->
+         The mass comes from the collision geoms. Must match OBJECT_SPECS in src/sysmic_rl/env/config.py. -->
     <!-- plate: parabolic dish, 12.4 cm, rim 2.2 cm high, 3 mm wall, 0.20 kg -->
     <body name="obj_plate" pos="0.175 -0.15 0.648" quat="1 0 0 0">
       <freejoint name="obj_plate_joint"/>

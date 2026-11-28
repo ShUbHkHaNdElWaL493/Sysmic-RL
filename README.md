@@ -8,7 +8,7 @@ Detailed per-package references:
 
 | Package | Doc | One-line purpose |
 |---|---|---|
-| `sysmic_rl.pickplace` | [pickplace/README.md](src/sysmic_rl/pickplace/README.md) | The *world*: scene, objects, the Gym environment, reward, calibration probe |
+| `sysmic_rl.env` | [env/README.md](src/sysmic_rl/env/README.md) | The *world*: scene, objects, the Gym environment, reward |
 | `sysmic_rl.imitation` | [imitation/README.md](src/sysmic_rl/imitation/README.md) | The *teacher*: scripted expert, demo recording, behaviour cloning, DAgger |
 | `sysmic_rl.training` | [training/README.md](src/sysmic_rl/training/README.md) | The *learner*: SAC setup, fine-tuning from demos, evaluation |
 
@@ -36,7 +36,7 @@ accidentally stumble into a successful grasp before it learns anything. So we do
 
 | Term | Meaning | Where it lives here |
 |---|---|---|
-| **Environment** | The simulated world. You give it an action, it returns what happened. | `pickplace/pickplace_env.py` → `SysmicPickPlaceEnv` |
+| **Environment** | The simulated world. You give it an action, it returns what happened. | `env/env.py` → `SysmicBotEnv` |
 | **Observation** (`obs`) | The vector of numbers the policy sees (joint angles, object pose, goal, contacts, …). 103 numbers with 4 utensils. | `_obs_parts()` in the env; layout in `env.obs_layout` |
 | **Action** | The vector the policy outputs: 13 numbers in [-1, 1] (lift + 2 arms × 6 joints). Each is "move this joint target a bit". | `step()` in the env |
 | **Reward** | A number after every step saying how well things are going. RL maximises the *sum* of rewards. | `_reward_and_flags()`; weights in `RewardConfig` |
@@ -62,10 +62,9 @@ the training code just calls it millions of times and nudges the network toward 
 
 ```
 src/sysmic_rl/
-├── pickplace/            THE WORLD (no learning code, no torch)
+├── env/                  THE WORLD (no learning code, no torch)
 │   ├── config.py         every tunable number (dataclasses) + utensil dimensions (OBJECT_SPECS)
-│   ├── pickplace_env.py  the Gymnasium environment (the heart)
-│   └── probe.py          calibration report for YOUR robot's geometry
+│   └── env.py            the Gymnasium environment (the heart)
 │
 ├── imitation/            THE TEACHER
 │   ├── expert.py         scripted privileged expert (IK + state machine)
@@ -78,19 +77,19 @@ src/sysmic_rl/
     ├── train_sac.py      demo-seeded SAC fine-tuning
     └── evaluate.py       success-rate measurement for any policy
 
-tests/                    pytest suite + a mesh-free stub robot
+tests/                    pytest suite on the real scene (also re-derives the gripper calibration)
 mjcf/sysmic_v2.xml        the robot (meshes in mjcf/meshes/) — never edited by the code
-mjcf/sysmic_v2_scene.xml  the scene: <include>s the robot + shelf proxy + table + 4 utensils (poses randomised at reset)
+mjcf/sysmic_v2_scene.xml  the scene: <include>s the robot + shelf riser + table + goal marker + 4 utensils (poses randomised at reset)
+mjcf/meshes/utensils/     visual meshes of the utensils
 ```
 
 ### Dependency rules (keep these when you edit)
 
 ```mermaid
 flowchart LR
-  subgraph pickplace
-    XML[(sysmic_v2_scene.xml)] --> E[pickplace_env]
+  subgraph env
+    XML[(sysmic_v2_scene.xml)] --> E[env]
     C[config] --> E
-    E --> P[probe]
   end
   subgraph imitation
     X[expert] --> CO[collect]
@@ -108,10 +107,10 @@ flowchart LR
   D --> TS
 ```
 
-* `pickplace` depends on **nothing else** in the project (only MuJoCo/Gymnasium/NumPy). You can test it without torch.
-* `imitation` depends on `pickplace`. `bc.py` additionally needs torch.
+* `env` depends on **nothing else** in the project (only MuJoCo/Gymnasium/NumPy). You can test it without torch.
+* `imitation` depends on `env`. `bc.py` additionally needs torch.
 * `training` depends on both and on stable-baselines3.
-* Never import `training` from `pickplace` — it would make the world depend on the learner.
+* Never import `training` from `env` — it would make the world depend on the learner.
 
 ---
 
@@ -157,7 +156,7 @@ outputs torques — it nudges targets. This is the same scheme as your original 
 * **Utensils.** Realistic shapes (smooth meshes + hollow primitive collision): a parabolic plate, a bowl, a wine glass with a thin stem,
   a hollow mug with a looped handle. **Grasps:** plate/bowl by the rim (jaw outside, finger inside), the glass by its **stem**, the mug by
   its **handle** (aimed at the grasping arm). The 5-joint arms fix the tool heading, so a grasp prescribes the tool's pitch
-  (`rim_pitch`/`stem_pitch`/`handle_pitch`) and the closing direction; the gripper geometry is calibrated (`ArmSpec`, `probe`).
+  (`rim_pitch`/`stem_pitch`/`handle_pitch`) and the closing direction; the gripper geometry is calibrated (`ArmSpec`, verified by a test).
 * **One arm or both.** Objects in `TaskConfig.bimanual_objects` (default plate, bowl) are **always** carried with **both** arms:
   the hands grip the rim `bimanual_rim_angle` (0.8 rad) either side of the robot-facing point (left hand +y, right hand −y), both
   must have finger+jaw contact to count as "grasped", and the expert drives both arms with one joint IK so they close, lift and
@@ -172,7 +171,7 @@ earlier problems.
 
 ```mermaid
 flowchart TD
-  A[0 Install & test] --> B[1 Calibrate to your robot]
+  A[0 Install & test] --> B[1 Workspace check]
   B --> C[2 Watch the expert]
   C --> D[3 Measure expert success]
   D -->|<85%| B
@@ -192,27 +191,26 @@ uv add stable-baselines3 h5py tensorboard
 uv add --dev pytest
 uv run pytest
 ```
-Runs the environment, expert and demo pipeline on the real scene. **Success:** `22 passed` (≈1 min: every env builds its reach cloud).
+Runs the environment, expert and demo pipeline on the real scene. **Success:** `22 passed` (≈40 s: every env builds its reach cloud).
 (If pytest fails to load a `launch_testing` plugin, ROS is on your `PYTHONPATH`: run `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest`.)
 
-### Stage 1 — calibrate (the most important stage)
+### Stage 1 — workspace check (already calibrated)
+The default scene is calibrated: gripper geometry and open/close angles (`ArmSpec`, `TaskConfig.gripper_*_q`), riser height, table
+height/ranges and grasp pitches are set in `env/config.py` and the scene XML. Stage 0 already verifies them:
+`test_gripper_calibration_matches_config` re-derives the gripper geometry from the MJCF, and `test_default_workspace_is_reachable`
+checks that every utensil gets a reachable shelf spot and table goal without overlapping anything.
+If you change the riser, the table (`table_z`, `table_*`) or the grasp pitches, re-run
 ```bash
-uv run python -m sysmic_rl.pickplace.probe
+uv run pytest -k "workspace or calibration"
 ```
-Prints (a) the **shelf** rectangle and how far below the arm bases it is,
-(b) what fraction of shelf spawns and table poses are **reachable** per utensil,
-(c) the gripper calibration (grasp offset, tool and closing axis vs `ArmSpec`), (d) which gripper angle is open/closed,
-(e) rest-pose contacts and the reachable envelope.
-Then edit `pickplace/config.py`: `table_z` / `table_gap` / `table_y`, the grasp pitches, `bimanual_rim_angle`
-(the gripper geometry and angles are already calibrated). See [pickplace §Calibration](src/sysmic_rl/pickplace/README.md#calibration).
-**Success:** reachability percentages are high (≳70 %) for the objects you care about; you know which gripper angle is "open".
+See [env §Calibration](src/sysmic_rl/env/README.md#calibration). **Success:** both pass; no `reach_fallback` in later stages.
 
 ### Stage 2 — look at it
 ```bash
 uv run python -m sysmic_rl.training.evaluate --expert --episodes 3 --render
 ```
 Opens the MuJoCo viewer. **Check by eye:** is the red goal sphere on the table? Does the gripper end up around
-the object? Does it close on it? If the grasp point is visibly off, re-run the probe's gripper calibration.
+the object? Does it close on it? If the grasp point is visibly off, check `ArmSpec` against `test_gripper_calibration_matches_config`.
 
 ### Stage 3 — measure the expert
 ```bash
@@ -279,8 +277,8 @@ Per-object and per-arm success rates are printed.
 
 | I want to… | Edit | Then you must… |
 |---|---|---|
-| Change where the table may appear / its size | `SceneConfig.table_*` in `config.py` | re-run probe + stage 2 |
-| Change where the utensils start / riser height | the `shelf` site + `shelf_top` geom in `mjcf/sysmic_v2_scene.xml` | re-run probe |
+| Change where the table may appear / its size | `SceneConfig.table_*` in `config.py` | `uv run pytest -k workspace` + stage 2 |
+| Change where the utensils start / riser height | the `shelf` site + `shelf_top` geom in `mjcf/sysmic_v2_scene.xml` | `uv run pytest -k workspace` |
 | Which objects are carried with both hands / how they are gripped | `TaskConfig.bimanual_objects`, `bimanual_rim_angle`, `*_pitch`; `OBJECT_SPECS` grasp point | re-collect demos |
 | Change gripper angles / home pose | `TaskConfig` | re-run stage 3 onward |
 | Add or edit a utensil (shape, size, mass) | `mjcf/sysmic_v2_scene.xml` (+ visual mesh in `mjcf/meshes/utensils/`) + `OBJECT_SPECS` (+ `SceneConfig.objects`) | **re-collect demos & retrain** (obs size changes if you add an object) |
@@ -325,11 +323,11 @@ term the agent farms (e.g. hovering near the object collects `reach` forever). F
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `ValueError` loading the scene XML | wrong scene path | `--scene-xml …` or `export SYSMIC_SCENE_XML=…` |
-| Expert stuck in `seed`/`pre`/`approach` | target unreachable or wrong tool axis | probe reachability %, tune `table_gap`/`table_z`/grasp pitches; the expert has no collision avoidance (see §10) |
-| `RuntimeWarning: No reachable table pose found` | `table_*` ranges don't intersect the arms' reach | probe; widen/shift ranges (info key `reach_fallback` marks those episodes) |
-| Plate grasp never closes on both sides | grasp offset / gripper sign / rim position | probe gripper sweep; tune `ArmSpec.grasp_offset`, `bimanual_rim_angle` (hands too close → collide) |
+| Expert stuck in `seed`/`pre`/`approach` | target unreachable or wrong tool axis | `uv run pytest -k workspace`, tune `table_gap`/`table_z`/grasp pitches; the expert has no collision avoidance (see §10) |
+| `RuntimeWarning: No reachable table pose found` | `table_*` ranges don't intersect the arms' reach | widen/shift ranges towards the arms (info key `reach_fallback` marks those episodes) |
+| Plate grasp never closes on both sides | grasp offset / gripper sign / rim position | `uv run pytest -k gripper`; tune `ArmSpec.grasp_offset`, `bimanual_rim_angle` (hands too close → collide) |
 | Expert grasps but object slips | friction / grip force / wrong gripper sign | check `gripper_close_q`; add pad geoms; raise friction |
-| `n_bad_contacts` always > 0 | rest-pose mesh overlap | probe lists them; they're auto-ignored at home pose, otherwise add `<exclude>` to your MJCF |
+| `n_bad_contacts` always > 0 | rest-pose mesh overlap | `env._baseline_pairs` lists them; they're auto-ignored at home pose, otherwise add `<exclude>` to your MJCF |
 | BC val loss fine, rollouts bad | distribution shift | DAgger rounds, more demos with `--noise 0.1`–`0.2` |
 | RL destroys the BC policy at the start | random critic | longer `--warmup`, smaller `ent_init`, lower learning rate |
 | Shape mismatch loading a checkpoint | obs/net changed | retrain (see §7) |

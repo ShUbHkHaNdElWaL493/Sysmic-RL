@@ -16,7 +16,7 @@ from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 
 from sysmic_rl.imitation.dataset import load_demos
-from sysmic_rl.pickplace import PickPlaceConfig
+from sysmic_rl.env import SysmicBotConfig
 from sysmic_rl.training.common import build_sac, make_vec_env
 
 
@@ -51,7 +51,7 @@ if __name__ == "__main__":
     ap.add_argument("--scene-xml", default=None)
     a = ap.parse_args()
 
-    cfg = PickPlaceConfig()
+    cfg = SysmicBotConfig()
     if a.scene_xml:
         cfg.scene.scene_xml = a.scene_xml
     env, eval_env = make_vec_env(cfg, 0), make_vec_env(cfg, 10_000)

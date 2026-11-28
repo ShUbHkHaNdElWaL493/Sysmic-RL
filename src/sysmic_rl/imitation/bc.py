@@ -52,7 +52,7 @@ def pretrain_actor(model, obs, labels, epochs=100, batch_size=512, lr=3e-4, val_
 
 
 if __name__ == "__main__":
-    from sysmic_rl.pickplace import PickPlaceConfig
+    from sysmic_rl.env import SysmicBotConfig
     from sysmic_rl.training.common import build_sac, make_vec_env
 
     p = argparse.ArgumentParser()
@@ -62,7 +62,7 @@ if __name__ == "__main__":
     p.add_argument("--device", default="auto")
     p.add_argument("--scene-xml", default=None)
     a = p.parse_args()
-    cfg = PickPlaceConfig()
+    cfg = SysmicBotConfig()
     if a.scene_xml:
         cfg.scene.scene_xml = a.scene_xml
     env = make_vec_env(cfg)

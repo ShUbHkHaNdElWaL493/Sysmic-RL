@@ -1,9 +1,8 @@
 """Configuration for the Sysmic pick-and-place task.
 
-Every number here that depends on the *real* robot geometry (grasp offsets,
-gripper open/close angles, table pose) is a first guess derived from the MJCF.
-Calibrate them with `python -m sysmic_rl.pickplace.probe`.
-The scene itself (robot + shelf + table + utensils) is the static `mjcf/sysmic_v2_scene.xml`.
+The robot-geometry numbers (ArmSpec grasp offsets / axes, gripper open/close angles) are calibrated once from the
+unmodified robot MJCF; tests/test_env.py re-derives them and fails if the model and this file disagree.
+The scene itself (robot + shelf riser + table + utensils + goal marker) is the static `mjcf/sysmic_v2_scene.xml`.
 """
 from __future__ import annotations
 
@@ -51,10 +50,11 @@ class ArmSpec:
     close_axis: tuple      # direction the jaw moves when closing, in finger_body frame (perpendicular to tool_axis)
 
 
-# Calibrated from the MJCF (meshes collide as convex hulls): a 1 cm rod placed 3 cm behind the fingertip rests
-# against the fixed finger's hull at grasp_offset, and the jaw reaches it at q ~ 1.5 (< gripper_close_q, so it
-# squeezes). The grasp point is ~6 mm from the wrist-roll axis, so rolling the wrist turns the closing direction
-# without moving the grasp point. Re-check with the probe's "gripper" section.
+# Calibrated from the MJCF (meshes collide as convex hulls): a 1 cm rod 12 cm along the fingers (~1.7 cm behind the
+# fingertip) rests against the fixed finger's hull at grasp_offset, and the jaw reaches it at q = 1.52
+# (< gripper_close_q, so it squeezes). tool_axis = wrist-roll joint axis; close_axis = jaw motion at the grasp point.
+# The grasp point is ~6 mm from the wrist-roll axis, so rolling the wrist turns the closing direction without moving
+# the grasp point. Verified by test_gripper_calibration_matches_config.
 LEFT_ARM = ArmSpec(
     "left",
     ("arm_left_pan_joint", "arm_left_shoulder_joint", "arm_left_elbow_joint",
@@ -87,7 +87,7 @@ class SceneConfig:
     table_yaw: tuple = (-math.pi / 2, math.pi / 2)   # covers every distinct orientation of a rectangle
     table_clearance: float = 0.03      # min gap between table and any robot geom / the shelf
     goal_margin: float = 0.01          # min distance between the placed object's footprint and the table edge
-    # --- reachability filtering (kinematic reach cloud; see pickplace_env._build_reach_cloud)
+    # --- reachability filtering (collision-free reach cloud built at init; see env._build_reach_cloud)
     reach_check: bool = True
     reach_samples: int = 50000
     reach_tol: float = 0.04            # grasp point must be within this of a reachable sample
@@ -106,7 +106,7 @@ class TaskConfig:
     arm_max_lag: float = 0.15
     gripper_max_lag: float = 0.30
     lift_max_lag: float = 0.03
-    # gripper angles from the probe's sweep (jaw<->finger distance 0.059 at -0.17, 0.035 at 1.75)
+    # gripper angles: jaw<->finger COM distance is 0.059 m at q=-0.17 (open) and 0.035 m at q=1.75 (closed)
     gripper_open_q: float = -0.1
     gripper_close_q: float = 1.75
     arm_home: tuple = (0.0, 0.0, 0.0, 0.0, 0.0, -0.1)
@@ -156,7 +156,7 @@ class RewardConfig:
 
 
 @dataclass
-class PickPlaceConfig:
+class SysmicBotConfig:
     scene: SceneConfig = field(default_factory=SceneConfig)
     task: TaskConfig = field(default_factory=TaskConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)

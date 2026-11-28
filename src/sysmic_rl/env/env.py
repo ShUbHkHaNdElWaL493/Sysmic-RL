@@ -16,7 +16,7 @@ import gymnasium as gym
 import mujoco
 import numpy as np
 
-from .config import ARMS, OBJECT_SPECS, PickPlaceConfig
+from .config import ARMS, OBJECT_SPECS, SysmicBotConfig
 
 SIDES = ("left", "right")
 
@@ -31,13 +31,13 @@ def _perp(v, axis):
     return v / np.linalg.norm(v)
 
 
-class SysmicPickPlaceEnv(gym.Env):
+class SysmicBotEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 50}
 
     # ------------------------------------------------------------------ init
-    def __init__(self, cfg: PickPlaceConfig | None = None, render_mode=None):
+    def __init__(self, cfg: SysmicBotConfig | None = None, render_mode=None):
         super().__init__()
-        self.cfg = cfg or PickPlaceConfig()
+        self.cfg = cfg or SysmicBotConfig()
         sc, tc = self.cfg.scene, self.cfg.task
         self.render_mode = render_mode
         self._renderer = None
@@ -140,10 +140,7 @@ class SysmicPickPlaceEnv(gym.Env):
         self._fric0 = m.geom_friction.copy()
         self._mass0 = m.body_mass.copy()
         self._inertia0 = m.body_inertia.copy()
-        try:
-            self._goal_mocap = int(m.body("left_target").mocapid[0])
-        except Exception:
-            self._goal_mocap = -1
+        self._goal_mocap = int(m.body("goal").mocapid[0])   # visual goal marker (scene XML)
 
     def _init_source(self):
         """The shelf (site in the scene XML) on the static base: world-frame rectangle (cx, cy, top_z, hx, hy)."""
@@ -628,8 +625,8 @@ class SysmicPickPlaceEnv(gym.Env):
                 break
         if not goal_ok:
             self.reach_fallback = True
-            warnings.warn("No reachable table pose found; using the last candidate. Widen SceneConfig.table_* "
-                          "or run the probe.", RuntimeWarning, stacklevel=2)
+            warnings.warn("No reachable table pose found; using the last candidate. Shift/widen SceneConfig.table_* "
+                          "(or table_z) towards the arms' reach.", RuntimeWarning, stacklevel=2)
             goal = np.array([*self.table_center, self.place_z])
         self.goal_pos = goal
         self.src_z = float(pos[2])
@@ -653,8 +650,7 @@ class SysmicPickPlaceEnv(gym.Env):
         mujoco.mj_forward(m, d)
         for _ in range(30):
             mujoco.mj_step(m, d)
-        if self._goal_mocap >= 0:
-            d.mocap_pos[self._goal_mocap] = self.goal_pos + np.array([0, 0, 0.03])
+        d.mocap_pos[self._goal_mocap] = self.goal_pos + np.array([0, 0, 0.03])
         self.step_count, self.hold, self.ever_grasped = 0, 0, False
         self.smoothed = np.zeros(13, dtype=np.float32)
         self.rest_com_z = float(self.object_com()[2])

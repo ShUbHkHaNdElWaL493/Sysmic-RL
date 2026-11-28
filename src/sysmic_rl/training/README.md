@@ -22,7 +22,7 @@ demonstrations we put in on purpose. The temperature `ent_coef` (how much it val
 ## `common.py`
 
 ### `make_vec_env(cfg=None, seed=0)`
-Builds a `DummyVecEnv` with one `Monitor`-wrapped `SysmicPickPlaceEnv`.
+Builds a `DummyVecEnv` with one `Monitor`-wrapped `SysmicBotEnv`.
 * **Why `Monitor`:** records episode return/length (and `is_success`) for logging.
 * **Why a vector env with 1 copy:** SB3 requires the VecEnv interface. The demo pre-fill in `train_sac.py` assumes exactly **one** env; for several you'd change `prefill_buffer`.
 * Note: normalisation is **inside** the env, so no `VecNormalize` — adding it would silently desynchronise BC and RL.
@@ -125,7 +125,7 @@ uv run python -m sysmic_rl.training.evaluate --model runs/sac/best_model.zip --e
 | Try PPO instead of SAC | build `PPO("MlpPolicy", env, ...)` in a new script. BC pretraining works differently (PPO's actor is a Gaussian, no `tanh`), and the buffer pre-fill/critic warm-up steps don't apply — start by copying `build_sac` and removing those |
 | Train on a GPU | `--device cuda` (small MLPs are often faster on CPU) |
 | More logging | add a `BaseCallback` subclass and pass it in `cbs` in `train_sac.py` |
-| Curriculum (easier task first) | train with a restricted `PickPlaceConfig` (e.g. `scene.objects=("glass",)`, `arm_mode="left"`) — note object list changes obs size |
+| Curriculum (easier task first) | train with a restricted `SysmicBotConfig` (e.g. `scene.objects=("glass",)`, `arm_mode="left"`) — note object list changes obs size |
 | Save more checkpoints | change the `CheckpointCallback` frequency |
 | Multi-env speed-up | replace `DummyVecEnv` with `SubprocVecEnv`, and rewrite `prefill_buffer` to add rows of shape `(n_envs, …)` |
 

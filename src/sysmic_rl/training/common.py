@@ -7,13 +7,13 @@ from stable_baselines3.common.logger import configure
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from sysmic_rl.pickplace import PickPlaceConfig, SysmicPickPlaceEnv
+from sysmic_rl.env import SysmicBotConfig, SysmicBotEnv
 
 
-def make_vec_env(cfg: PickPlaceConfig | None = None, seed: int = 0):
+def make_vec_env(cfg: SysmicBotConfig | None = None, seed: int = 0):
     """Single-env VecEnv. (Demo pre-filling assumes n_envs == 1.)"""
     def _thunk():
-        env = Monitor(SysmicPickPlaceEnv(cfg or PickPlaceConfig()), info_keywords=("is_success",))
+        env = Monitor(SysmicBotEnv(cfg or SysmicBotConfig()), info_keywords=("is_success",))
         env.reset(seed=seed)
         return env
     return DummyVecEnv([_thunk])

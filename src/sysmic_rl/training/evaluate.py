@@ -6,11 +6,11 @@ from collections import defaultdict
 
 import numpy as np
 
-from sysmic_rl.pickplace import PickPlaceConfig, SysmicPickPlaceEnv
+from sysmic_rl.env import SysmicBotConfig, SysmicBotEnv
 
 
 def evaluate(policy_fn, cfg=None, episodes=100, seed=1000, render=False):
-    env = SysmicPickPlaceEnv(cfg or PickPlaceConfig(), render_mode="human" if render else None)
+    env = SysmicBotEnv(cfg or SysmicBotConfig(), render_mode="human" if render else None)
     per = defaultdict(list)
     returns = []
     for ep in range(episodes):
@@ -36,7 +36,7 @@ if __name__ == "__main__":
     p.add_argument("--episodes", type=int, default=100); p.add_argument("--render", action="store_true")
     p.add_argument("--scene-xml", default=None)
     a = p.parse_args()
-    cfg = PickPlaceConfig()
+    cfg = SysmicBotConfig()
     if a.scene_xml:
         cfg.scene.scene_xml = a.scene_xml
     if a.expert:

@@ -1,15 +1,14 @@
-# `sysmic_rl.pickplace` — the world
+# `sysmic_rl.env` — the world
 
 This package contains everything about the *simulated world*: what is in the scene, where objects start and where they must end,
 what the robot can sense, and how well it is doing (reward). It has **no learning code** and does not import torch,
 so you can run and test it on its own.
 
 ```
-pickplace/
-├── __init__.py         registers the Gym id "SysmicPickPlace-v0" and re-exports the main classes
+env/
+├── __init__.py         registers the Gym id "SysmicBot-v1" and re-exports the main classes
 ├── config.py           all tunable numbers, as dataclasses (+ OBJECT_SPECS: utensil dimensions)
-├── pickplace_env.py    SysmicPickPlaceEnv — the Gymnasium environment (the heart)
-└── probe.py            calibration report for your robot's geometry
+└── env.py              SysmicBotEnv — the Gymnasium environment (the heart)
 ```
 
 The scene itself is the static file `mjcf/sysmic_v2_scene.xml` (see [Scene XML](#scene-xml)).
@@ -17,11 +16,11 @@ The scene itself is the static file `mjcf/sysmic_v2_scene.xml` (see [Scene XML](
 Quick use:
 
 ```python
-from sysmic_rl.pickplace import SysmicPickPlaceEnv, PickPlaceConfig
+from sysmic_rl.env import SysmicBotEnv, SysmicBotConfig
 
-cfg = PickPlaceConfig()
+cfg = SysmicBotConfig()
 cfg.scene.scene_xml = "mjcf/sysmic_v2_scene.xml"   # the default; or set $SYSMIC_SCENE_XML
-env = SysmicPickPlaceEnv(cfg, render_mode="human")
+env = SysmicBotEnv(cfg, render_mode="human")
 obs, info = env.reset(seed=0, options={"object": "plate"})      # plate -> info["arm"] == "both"
 while True:
    obs, reward, terminated, truncated, info = env.step(env.action_space.sample())
@@ -47,6 +46,7 @@ One static file, compiled once per env. It `<include>`s `sysmic_v2.xml` (never e
 | geom `shelf_top` | 15 cm riser standing on the robot's shelf (z = 0.496); the utensils rest on it (the robot's shelf alone is below the arms' reach) | — |
 | `<contact><exclude>` base_link ↔ each utensil | MuJoCo collides the `base_link` mesh as its **convex hull**, which fills the shelf recess; the utensils ignore the hull and rest on `shelf_top` instead | — |
 | body `table` (geom `table_top` + 4 visual legs) | destination table; body origin = centre of the top face; top at a fixed 0.85 m (= `table_z`) | `model.body_pos` (x, y) + `model.body_quat` (yaw) |
+| body `goal` (mocap, visual sphere) | red goal marker, 3 cm above the goal | `data.mocap_pos` |
 | bodies `obj_plate/glass/bowl/mug` (free joints) | utensils, origin = centre of the base bottom (details below) | `data.qpos` (row on the shelf) |
 | `<option><flag multiccd>` | several contact points between convex shapes, so the utensil bases rest flat instead of rocking/sinking | — |
 | more `<contact><exclude>` | robot links two joints apart whose convex hulls overlap although the real parts never touch (wrist↔jaw, arm base↔upper arm, shoulder pan↔forearm) | — |
@@ -71,7 +71,7 @@ the name to `SceneConfig.objects`, then **re-collect demos and retrain** (the ob
 
 ## `config.py` — every knob in one place
 
-Dataclasses nested into `PickPlaceConfig(scene, task, reward)`. Override fields in code (`cfg.task.max_episode_steps = 300`).
+Dataclasses nested into `SysmicBotConfig(scene, task, reward)`. Override fields in code (`cfg.task.max_episode_steps = 300`).
 
 ### `ArmSpec` / `LEFT_ARM` / `RIGHT_ARM` / `ARMS`
 | Field | Meaning |
@@ -79,12 +79,14 @@ Dataclasses nested into `PickPlaceConfig(scene, task, reward)`. Override fields 
 | `joints` | 6 joint names: pan, shoulder, elbow, wrist_flex, wrist_roll, **gripper** (in this order — code relies on it) |
 | `finger_body` | body whose frame the grasp point is attached to (`arm_*_wrist_roll_link`, carries the fixed finger) |
 | `jaw_body` | the moving jaw body (used to detect "jaw touches object") |
-| `grasp_offset` | grasp point **in the finger body's frame**: where a ~1 cm object rests against the fixed finger when clamped, 3 cm behind the tip (0.120, ±0.0027, 0.0047) |
+| `grasp_offset` | grasp point **in the finger body's frame**: where a ~1 cm object rests against the fixed finger when clamped, ~1.7 cm behind the tip (0.120, ±0.0027, 0.0047) |
 | `tool_axis` | direction the fingers point, in the finger body frame = the wrist-roll axis (+x) |
 | `close_axis` | direction the jaw moves when closing, in the finger body frame: (0, ∓0.5, −0.866). The fixed finger is on the opposite side of the object |
 
-All three are **calibrated** from the MJCF collision shapes by `probe.calibrate_gripper()` (and checked by a test). The grasp point is ~6 mm
-from the wrist-roll axis, so the wrist roll turns the closing direction without moving the grasp point.
+All three were **calibrated once** from the robot's collision shapes (the robot MJCF is never edited, so they don't change).
+`calibrate_gripper()` in `tests/test_env.py` re-derives them — a 1 cm rod slid against the fixed finger's hull, then the jaw closed
+until it touches the rod (q = 1.52 < `gripper_close_q`, so it squeezes) — and `test_gripper_calibration_matches_config` fails if they
+drift. The grasp point is ~6 mm from the wrist-roll axis, so the wrist roll turns the closing direction without moving the grasp point.
 
 ### `SceneConfig`
 | Field | Default | Meaning |
@@ -109,7 +111,7 @@ from the wrist-roll axis, so the wrist roll turns the closing direction without 
 | Smoothing | `ema_alpha` (0.25) | lower = smoother but laggier |
 | Speeds | `arm_action_scale` (0.03 rad/step), `gripper_action_scale` (0.08), `lift_action_scale` (0.002 m/step) | max target movement per step at action = 1 |
 | Anti-windup | `arm_max_lag`, `gripper_max_lag`, `lift_max_lag` | target may not get further than this from the actual joint |
-| Gripper | `gripper_open_q` (−0.1), `gripper_close_q` (1.75) | from the probe's sweep (jaw↔finger 0.059 m at −0.17, 0.035 m at 1.75) |
+| Gripper | `gripper_open_q` (−0.1), `gripper_close_q` (1.75) | q increases = closing (jaw↔finger 0.059 m at −0.17, 0.035 m at 1.75); checked by `test_gripper_close_q_is_closed` |
 | Home | `arm_home`, `home_noise`, `lift_home_range` | start pose of every episode |
 | Grasp pitch | `rim_pitch` (0.9), `stem_pitch` (1.0), `handle_pitch` (0.7) rad | tool axis pitched down from horizontal per grasp style (the heading follows the arm) |
 | **Bimanual** | `bimanual_objects` (plate, bowl), `bimanual_y_max` (0.10), `bimanual_rim_angle` (0.8 rad) | see [Bimanual episodes](#bimanual) |
@@ -122,8 +124,8 @@ Weights of each reward term; see [Reward](#reward).
 
 ---
 
-## `pickplace_env.py` — the environment
-`SysmicPickPlaceEnv(cfg=None, render_mode=None)` follows the Gymnasium API.
+## `env.py` — the environment
+`SysmicBotEnv(cfg=None, render_mode=None)` follows the Gymnasium API.
 
 ### Spaces
 * **Action** `Box(−1, 1, (13,))` = `[lift, left×6, right×6]` (6th entry of each arm = gripper). Inactive arms are masked to 0.
@@ -218,18 +220,19 @@ the jaws close the right way, as a starting pose for the expert. Still a *necess
 
 ---
 
-## `probe.py` — calibration report <a name="calibration"></a>
+## <a name="calibration"></a>Workspace calibration (done; how to re-check)
 
-```bash
-uv run python -m sysmic_rl.pickplace.probe --samples 20000      # [--scene-xml mjcf/sysmic_v2_scene.xml]
-```
-Sections:
-1. **Shelf** — the site rectangle and how far below the arm bases it is at lift 0 / max.
-2. **Reachability** — per utensil (its arm mode): % of shelf spawns reachable, % of random table poses clear of the robot, and % that also have a reachable goal.
-   Low numbers tell you what to change: `table_*`, the grasp pitches, `bimanual_rim_angle`, relax `reach_axis_tol`.
-3. **Gripper calibration** — `calibrate_gripper()` recomputes `grasp_offset`, `tool_axis`, `close_axis` from the collision shapes and the jaw
-   angle that clamps a 1 cm rod; compare with `ArmSpec`. 4. **Home-pose contacts** (auto-ignored by the reward).
-5. **Gripper sweep** — smaller jaw↔finger distance = closed → `gripper_open_q/close_q`. 6. **Reachable envelope** for hand-tuning.
+The workspace is set up for the default scene and needs no calibration step before training:
+
+| What | Where it lives | Re-checked by |
+|---|---|---|
+| Gripper geometry (`grasp_offset`, `tool_axis`, `close_axis`) and open/close angles | `ArmSpec`, `TaskConfig.gripper_*_q` | `test_gripper_calibration_matches_config`, `test_gripper_close_q_is_closed` |
+| Shelf / table / goals reachable for every utensil | scene XML + `SceneConfig.table_*` + grasp pitches | every `reset()` (`info["reach_fallback"]`, `RuntimeWarning`) and `test_default_workspace_is_reachable` |
+| Utensils spawn without overlapping each other or the robot | `OBJECT_SPECS.footprint_y`, `shelf_min_gap` | `test_default_workspace_is_reachable` |
+| Rest-pose mesh overlaps | computed automatically at env start (currently none) | — |
+
+Measured on the default scene (200 random poses each): shelf spawns reachable — plate 95 %, glass 100 %, bowl 100 %, mug 44 %;
+random table poses with a reachable goal 15–46 %. `reset()` retries (100 shelf rows, 60 tables × 20 goals), so 300 test resets had **0** fallbacks.
 
 ---
 
@@ -237,11 +240,11 @@ Sections:
 
 | Change | How | Watch out for |
 |---|---|---|
-| Different table range | `SceneConfig.table_*` | re-run probe; check "goal reachable" |
-| Different table size / height / riser | edit `table_top` (+ `table_z`) / the `shelf` site + `shelf_top` geom in the scene XML | verify with probe + viewer |
+| Different table range | `SceneConfig.table_*` | `uv run pytest -k workspace`; `reach_fallback` in `evaluate` output |
+| Different table size / height / riser | edit `table_top` (+ `table_z`) / the `shelf` site + `shelf_top` geom in the scene XML | `uv run pytest -k workspace` + viewer |
 | New reward term | add to `terms` in `_reward_and_flags()` + `RewardConfig` | demos store old rewards → re-collect |
 | New observation | `_obs_parts()` | dims change → demos/models invalid |
-| More bimanual objects | `TaskConfig.bimanual_objects` | re-collect; check probe "both-arms" % |
+| More bimanual objects | `TaskConfig.bimanual_objects` | re-collect; `uv run pytest -k workspace` |
 | Three-point / tray grasp | extend `grasp_plan()` (and the expert uses it automatically) | action space already supports it |
 | New randomisation | in `reset()` using `self.np_random` | never use global `np.random` |
 

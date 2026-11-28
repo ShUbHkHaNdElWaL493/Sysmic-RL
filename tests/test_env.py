@@ -6,25 +6,25 @@ import pytest
 
 from sysmic_rl.imitation.collect import collect
 from sysmic_rl.imitation.dataset import load_demos
-from sysmic_rl.pickplace import PickPlaceConfig, SysmicPickPlaceEnv
+from sysmic_rl.env import SysmicBotConfig, SysmicBotEnv
 
 warnings.filterwarnings("ignore", message="No reachable table pose")
 
 
 @pytest.fixture(scope="module")
 def cfg():
-    c = PickPlaceConfig()          # the real mjcf/sysmic_v2_scene.xml
+    c = SysmicBotConfig()          # the real mjcf/sysmic_v2_scene.xml
     c.scene.reach_samples = 20000  # sparser clouds make most resets fall back
     return c
 
 
 @pytest.fixture(scope="module")
 def env(cfg):
-    return SysmicPickPlaceEnv(cfg)
+    return SysmicBotEnv(cfg)
 
 
 def test_spaces_and_determinism(cfg):
-    e1, e2 = SysmicPickPlaceEnv(cfg), SysmicPickPlaceEnv(cfg)
+    e1, e2 = SysmicBotEnv(cfg), SysmicBotEnv(cfg)
     o1, _ = e1.reset(seed=3)
     o2, _ = e2.reset(seed=3)
     assert o1.shape == e1.observation_space.shape and np.allclose(o1, o2)
@@ -95,9 +95,61 @@ def test_grasp_plans_target_handle_stem_and_rims(env):
         assert abs(t @ c) < 1e-9 and c @ np.r_[o[:2] - p[:2], 0] > 0              # jaw moves inwards: finger inside
 
 
+def calibrate_gripper(scene_xml, side, rod_r=0.005, depth=0.12):
+    """Gripper geometry in the finger-body frame, from the collision shapes (meshes collide as convex hulls).
+
+    tool_axis  = wrist-roll joint axis (the fingers extend along it).
+    close_axis = direction the jaw moves at the grasp point when the gripper closes (q increasing).
+    grasp_offset = where a rod of radius rod_r, `depth` m along the fingers, rests against the fixed finger's hull
+    (the jaw pushes it there). jaw_q = gripper angle at which the jaw touches it (must be < gripper_close_q).
+    """
+    from sysmic_rl.env.config import ARMS
+    arm = ARMS[side]
+    spec = mujoco.MjSpec.from_file(str(scene_xml))
+    b = spec.worldbody.add_body(name="calib_rod", pos=[0, 0, 3])
+    b.add_freejoint()
+    b.add_geom(name="calib_rod", type=mujoco.mjtGeom.mjGEOM_CAPSULE, size=[rod_r, 0.02, 0])
+    m = spec.compile()
+    d = mujoco.MjData(m)
+    fb, jb = m.body(arm.finger_body).id, m.body(arm.jaw_body).id
+    fg = next(g for g in range(m.ngeom) if m.geom_bodyid[g] == fb and m.geom_contype[g])
+    jg = next(g for g in range(m.ngeom) if m.geom_bodyid[g] == jb and m.geom_contype[g])
+    jid = m.joint(arm.joints[5]).id
+    jq, rg = m.jnt_qposadr[jid], m.geom("calib_rod").id
+    ra = m.jnt_qposadr[m.body("calib_rod").jntadr[0]]
+    d.qpos[jq] = m.jnt_range[jid][0]
+    mujoco.mj_kinematics(m, d)
+    R, p0 = d.xmat[fb].reshape(3, 3).copy(), d.xpos[fb].copy()
+    tool = m.jnt_axis[m.joint(arm.joints[4]).id].copy()
+    hinge, axis = R.T @ (d.xanchor[jid] - p0), R.T @ d.xaxis[jid]
+    pt = depth * tool
+    close = np.cross(axis, pt - hinge)
+    close -= (close @ tool) * tool
+    close /= np.linalg.norm(close)
+    binormal = np.cross(tool, close)
+    q = np.zeros(4)
+    mujoco.mju_mat2Quat(q, np.column_stack([R @ tool, R @ np.cross(binormal, tool), R @ binormal]).flatten())
+    d.qpos[ra + 3:ra + 7] = q
+    rest = None
+    for s_ in np.arange(-0.02, 0.06, 0.0002):                 # slide the rod off the finger hull along -close
+        cand = pt - close * s_
+        d.qpos[ra:ra + 3] = p0 + R @ cand
+        mujoco.mj_kinematics(m, d)
+        if mujoco.mj_geomDistance(m, d, rg, fg, 0.05, None) > 0:
+            rest = cand
+            break
+    jaw_q = None
+    for gq in np.arange(*m.jnt_range[jid], 0.005):             # close until the jaw touches it
+        d.qpos[jq] = gq
+        mujoco.mj_kinematics(m, d)
+        if mujoco.mj_geomDistance(m, d, rg, jg, 0.05, None) <= 0:
+            jaw_q = float(gq)
+            break
+    return {"grasp_offset": rest, "tool_axis": tool, "close_axis": close, "jaw_q": jaw_q}
+
+
 def test_gripper_calibration_matches_config(cfg):
-    from sysmic_rl.pickplace.config import ARMS
-    from sysmic_rl.pickplace.probe import calibrate_gripper
+    from sysmic_rl.env.config import ARMS
     for s in ("left", "right"):
         c = calibrate_gripper(cfg.scene.scene_xml, s)
         assert np.allclose(c["grasp_offset"], ARMS[s].grasp_offset, atol=1e-3)
@@ -130,7 +182,7 @@ def test_table_in_front_at_fixed_height(env, cfg):
         assert abs(env.goal_pos[2] - env.place_z) < 1e-9
         assert np.all(np.abs(env.world_to_table(env.goal_pos[:2])) <= env.table_half)
         assert env.reachable(env.grasp_plan(env.goal_pos), env.sides)
-    assert checked >= 6   # fallbacks (sparse test reach cloud) are covered by the probe, not here
+    assert checked >= 6   # fallbacks come from the sparse test cloud; see test_default_workspace_is_reachable
 
 
 def test_table_options_and_frames(env):
@@ -227,7 +279,7 @@ def test_collect_and_load(cfg, tmp_path):
     out = tmp_path / "d.h5"
     collect(2, str(out), cfg, noise=0.0, seed=0, keep_failures=True, log=lambda *_: None)
     d, n = load_demos(str(out), successful_only=False)
-    assert d["obs"].shape[1] == SysmicPickPlaceEnv(cfg).observation_space.shape[0]
+    assert d["obs"].shape[1] == SysmicBotEnv(cfg).observation_space.shape[0]
     assert d["actions"].shape[1] == 13 and len(d["obs"]) == len(d["rewards"])
 
 
@@ -239,10 +291,17 @@ def test_seed_config(env):
     assert set(q5) == set(env.sides) and all(len(q) == 5 for q in q5.values())
 
 
-def test_probe_runs(cfg, capsys):
-    import sys
-    from sysmic_rl.pickplace import probe
-    sys.argv = ["probe", "--scene-xml", cfg.scene.scene_xml, "--samples", "400"]
-    probe.main()
-    out = capsys.readouterr().out
-    assert "shelf" in out and "reachability" in out
+def test_default_workspace_is_reachable():
+    """With the default config (full reach cloud) every object gets a reachable shelf spot AND table goal. Run this
+    after changing the riser, table_z / table_* ranges or the grasp pitches."""
+    env = SysmicBotEnv()
+    m, d = env.model, env.data
+    for name in env.object_names:
+        for seed in range(15):
+            _, info = env.reset(seed=seed, options={"object": name})
+            assert not info["reach_fallback"], (name, seed)
+            for i in range(d.ncon):                                   # no utensil spawns inside another / the robot
+                g1, g2 = d.contact.geom[i]
+                if env.geom_obj[g1] >= 0 or env.geom_obj[g2] >= 0:
+                    assert d.contact.dist[i] > -2e-3, (name, seed, m.geom(g1).name, m.geom(g2).name)
+            assert np.allclose(d.mocap_pos[env._goal_mocap], env.goal_pos + [0, 0, 0.03])
